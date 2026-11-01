@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func serve(t *testing.T, h http.HandlerFunc) *Backend {
@@ -104,6 +105,81 @@ func TestCanceledContextIsNotABackendError(t *testing.T) {
 	_, err := b.Stream(ctx, Request{Prompt: "x"}, func(string) error { return nil })
 	if !errors.Is(err, context.Canceled) || IsRetryable(err) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestOverloadedMarksBackend(t *testing.T) {
+	b := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "2")
+		http.Error(w, "full", 503)
+	})
+	if b.Avoided() {
+		t.Fatal("overloaded before any request")
+	}
+	b.Stream(context.Background(), Request{Prompt: "x"}, func(string) error { return nil })
+	if !b.Avoided() {
+		t.Fatal("503 did not mark the backend overloaded")
+	}
+}
+
+func TestScrape(t *testing.T) {
+	b := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		// as TinyServe renders it, with other metrics around the two we need
+		fmt.Fprint(w, `# HELP tinyserve_queue_depth Requests waiting for a batch slot.
+# TYPE tinyserve_queue_depth gauge
+tinyserve_queue_depth 3
+tinyserve_queue_wait_seconds_count 10
+# TYPE tinyserve_active_sequences gauge
+tinyserve_active_sequences 16.0
+tinyserve_requests_total{status="ok"} 12
+`)
+	})
+	if err := b.Scrape(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if b.Load() != 19 {
+		t.Errorf("Load = %d, want 19", b.Load())
+	}
+}
+
+func TestScrapeRejectsMissingGauges(t *testing.T) {
+	b := serve(t, func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "tinyserve_queue_depth 1\n") })
+	b.SetScraped(7, 7)
+	if err := b.Scrape(context.Background()); err == nil {
+		t.Fatal("expected an error")
+	}
+	if b.Load() != 14 {
+		t.Errorf("failed scrape changed Load to %d", b.Load())
+	}
+}
+
+func TestLoadIsMaxOfInflightAndScraped(t *testing.T) {
+	release := make(chan struct{})
+	b := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		<-release
+		sse(w, "event: done\ndata: {}\n\n")
+	})
+	done := make(chan struct{})
+	for i := 0; i < 3; i++ {
+		go func() {
+			b.Stream(context.Background(), Request{Prompt: "x"}, func(string) error { return nil })
+			done <- struct{}{}
+		}()
+	}
+	for b.Inflight() < 3 {
+		time.Sleep(time.Millisecond)
+	}
+	b.SetScraped(0, 1) // stale scrape from before these requests
+	if b.Load() != 3 {
+		t.Errorf("Load = %d, want in-flight 3", b.Load())
+	}
+	b.SetScraped(2, 8) // other gateways' traffic too
+	if b.Load() != 10 {
+		t.Errorf("Load = %d, want scraped 10", b.Load())
+	}
+	close(release)
+	for i := 0; i < 3; i++ {
+		<-done
 	}
 }
 

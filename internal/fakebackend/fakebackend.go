@@ -19,6 +19,12 @@ type Config struct {
 	PrefillDelay time.Duration // before the first token
 	TokensPerSSE int           // tokens per `token` event, like TinyServe's steps_per_call (default 8)
 
+	// Capacity, modelled on TinyServe's scheduler: at most Slots sequences
+	// generate at once (0 = unlimited); the rest wait in a queue of at most
+	// MaxQueue (0 = unlimited), and beyond that requests get 503.
+	Slots    int
+	MaxQueue int
+
 	// Faults. FailRate and OverloadRate are probabilities in [0, 1].
 	FailRate     float64 // answer 500 before streaming
 	OverloadRate float64 // answer 503 before streaming
@@ -29,6 +35,8 @@ type Server struct {
 	mu  sync.RWMutex
 	cfg Config
 
+	slots    chan struct{} // nil when Slots == 0; sized at New, not by Configure
+	queued   atomic.Int64
 	active   atomic.Int64
 	requests atomic.Int64
 	canceled atomic.Int64
@@ -36,6 +44,9 @@ type Server struct {
 
 func New(cfg Config) *Server {
 	s := &Server{}
+	if cfg.Slots > 0 {
+		s.slots = make(chan struct{}, cfg.Slots)
+	}
 	s.Configure(cfg)
 	return s
 }
@@ -70,7 +81,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		fmt.Fprintf(w, "tinyserve_queue_depth 0\ntinyserve_active_sequences %d\n", s.active.Load())
+		fmt.Fprintf(w, "tinyserve_queue_depth %d\ntinyserve_active_sequences %d\n", s.queued.Load(), s.active.Load())
 	})
 	return mux
 }
@@ -95,14 +106,31 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"detail":"injected failure"}`, http.StatusInternalServerError)
 		return
 	case roll < cfg.FailRate+cfg.OverloadRate:
-		w.Header().Set("Retry-After", "1")
-		http.Error(w, `{"detail":"queue is full, retry later"}`, http.StatusServiceUnavailable)
+		overloaded(w)
 		return
 	}
 
+	start := time.Now()
+	if s.slots != nil {
+		if n := s.queued.Add(1); cfg.MaxQueue > 0 && n > int64(cfg.MaxQueue) {
+			s.queued.Add(-1)
+			overloaded(w)
+			return
+		}
+		select {
+		case s.slots <- struct{}{}:
+			s.queued.Add(-1)
+			defer func() { <-s.slots }()
+		case <-r.Context().Done():
+			s.queued.Add(-1)
+			s.canceled.Add(1)
+			return
+		}
+	}
+	queueWait := time.Since(start)
+
 	s.active.Add(1)
 	defer s.active.Add(-1)
-	start := time.Now()
 	flusher := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
@@ -154,9 +182,14 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 	writeEvent(w, "done", map[string]any{
 		"text": text, "prompt_tokens": len(req.Prompt) / 4, "tokens_generated": req.MaxTokens,
-		"latency_ms": ms(time.Since(start)), "queue_ms": 0.0, "ttft_ms": ms(ttft), "seed": seed,
+		"latency_ms": ms(time.Since(start)), "queue_ms": ms(queueWait), "ttft_ms": ms(ttft), "seed": seed,
 	})
 	flusher.Flush()
+}
+
+func overloaded(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	http.Error(w, `{"detail":"queue is full, retry later"}`, http.StatusServiceUnavailable)
 }
 
 func writeEvent(w http.ResponseWriter, event string, data any) {

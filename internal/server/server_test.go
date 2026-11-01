@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http/httptest"
@@ -38,16 +39,24 @@ func startReplicas(t *testing.T, cfgs ...fakebackend.Config) []replica {
 	return rs
 }
 
-// startGateway serves the gateway over an in-memory listener and returns a client.
+// startGateway serves a round-robin gateway over an in-memory listener and returns a client.
 func startGateway(t *testing.T, rs []replica) pb.InferenceClient {
+	return startGatewayWith(t, rs, "round_robin")
+}
+
+func startGatewayWith(t *testing.T, rs []replica, routerName string) pb.InferenceClient {
 	t.Helper()
 	var pool []*backend.Backend
 	for _, r := range rs {
 		pool = append(pool, backend.New(r.http.URL, nil))
 	}
+	rt, err := router.New(routerName, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	pb.RegisterInferenceServer(srv, New(Config{Backends: pool, Router: &router.RoundRobin{}}))
+	pb.RegisterInferenceServer(srv, New(Config{Backends: pool, Router: rt}))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 
@@ -175,6 +184,54 @@ func TestFailsOverBeforeFirstToken(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOverloadedReplicaIsAvoidedAfterIts503(t *testing.T) {
+	for _, name := range []string{"least_loaded", "consistent_hash"} {
+		t.Run(name, func(t *testing.T) {
+			rs := startReplicas(t, fakebackend.Config{OverloadRate: 1}, fakebackend.Config{})
+			c := startGatewayWith(t, rs, name)
+			// keep sending until the overloaded replica has been tried once
+			for rs[0].fake.Requests() == 0 {
+				if _, _, err := generate(context.Background(), c, &pb.GenerateRequest{Prompt: distinctPrompt(), MaxTokens: 4}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for i := 0; i < 20; i++ {
+				_, u, err := generate(context.Background(), c, &pb.GenerateRequest{Prompt: distinctPrompt(), MaxTokens: 4})
+				if err != nil || u.Attempts != 1 || u.Backend != rs[1].http.URL {
+					t.Fatalf("usage = %v, err = %v; want first-try success on the healthy replica", u, err)
+				}
+			}
+			if rs[0].fake.Requests() != 1 {
+				t.Errorf("overloaded replica got %d requests during its Retry-After window", rs[0].fake.Requests())
+			}
+		})
+	}
+}
+
+var promptSeq int
+
+func distinctPrompt() string {
+	promptSeq++
+	return fmt.Sprintf("prompt %d", promptSeq)
+}
+
+func TestDeadReplicaDoesNotAttractLeastLoadedTraffic(t *testing.T) {
+	// A dead replica has no in-flight streams and frozen scrape figures, so it
+	// would look idle; one failed connection must make routing avoid it.
+	rs := startReplicas(t, fakebackend.Config{}, fakebackend.Config{})
+	rs[0].http.Close()
+	c := startGatewayWith(t, rs, "least_loaded")
+	for i := 0; i < 20; i++ {
+		_, u, err := generate(context.Background(), c, &pb.GenerateRequest{Prompt: "x", MaxTokens: 4})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i > 0 && u.Attempts != 1 {
+			t.Fatalf("request %d tried the dead replica again (attempts=%d)", i, u.Attempts)
+		}
 	}
 }
 

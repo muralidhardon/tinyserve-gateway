@@ -19,6 +19,8 @@ func main() {
 	flag.DurationVar(&cfg.TokenDelay, "token-delay", time.Millisecond, "delay per generated token")
 	flag.DurationVar(&cfg.PrefillDelay, "prefill-delay", 5*time.Millisecond, "delay before the first token")
 	flag.IntVar(&cfg.TokensPerSSE, "tokens-per-event", 8, "tokens per SSE token event")
+	flag.IntVar(&cfg.Slots, "slots", 0, "sequences generating at once; the rest queue (0 = unlimited)")
+	flag.IntVar(&cfg.MaxQueue, "max-queue", 0, "queued requests before 503 (0 = unlimited)")
 	flag.Float64Var(&cfg.FailRate, "fail-rate", 0, "probability of answering 500")
 	flag.Float64Var(&cfg.OverloadRate, "overload-rate", 0, "probability of answering 503")
 	flag.IntVar(&cfg.DropAfter, "drop-after", 0, "cut the connection after this many tokens (0 = never)")

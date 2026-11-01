@@ -29,6 +29,8 @@ import (
 func main() {
 	listen := flag.String("listen", ":9000", "gRPC listen address")
 	backends := flag.String("backends", "http://localhost:8000", "comma-separated TinyServe base URLs")
+	routerName := flag.String("router", "least_loaded", "routing strategy: "+strings.Join(router.Names, ", "))
+	scrapeInterval := flag.Duration("scrape-interval", 250*time.Millisecond, "how often to read each replica's /metrics")
 	maxAttempts := flag.Int("max-attempts", 0, "replicas one request may try before its first token (0 = all)")
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "how long shutdown waits for open streams")
 	verbose := flag.Bool("v", false, "debug logging")
@@ -56,6 +58,11 @@ func main() {
 		log.Error("no backends given")
 		os.Exit(2)
 	}
+	rt, err := router.New(*routerName, pool)
+	if err != nil {
+		log.Error("router", "err", err)
+		os.Exit(2)
+	}
 
 	lis, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -64,7 +71,7 @@ func main() {
 	}
 	grpcServer := grpc.NewServer()
 	pb.RegisterInferenceServer(grpcServer, server.New(server.Config{
-		Backends: pool, Router: &router.RoundRobin{}, MaxAttempts: *maxAttempts, Logger: log,
+		Backends: pool, Router: rt, MaxAttempts: *maxAttempts, Logger: log,
 	}))
 	healthSrv := health.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthSrv)
@@ -72,6 +79,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go backend.ScrapeLoop(ctx, pool, *scrapeInterval, func(b *backend.Backend, err error) {
+		log.Debug("scrape failed", "backend", b.Name, "err", err)
+	})
 	go func() {
 		<-ctx.Done()
 		// Fail health checks first so load balancers stop sending new streams,
@@ -92,7 +102,7 @@ func main() {
 	for i, b := range pool {
 		names[i] = b.Name
 	}
-	log.Info("gateway listening", "addr", lis.Addr().String(), "backends", names)
+	log.Info("gateway listening", "addr", lis.Addr().String(), "router", *routerName, "backends", names)
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Error("serve", "err", err)
 		os.Exit(1)
