@@ -35,6 +35,9 @@ type result struct {
 	TTFT      time.Duration `json:"ttft_ns"`
 	Latency   time.Duration `json:"latency_ns"`
 	Tokens    uint32        `json:"tokens"`
+	Prompt    uint32        `json:"prompt_tokens"`
+	Reused    uint32        `json:"prefix_tokens_reused"`
+	Tenant    int           `json:"tenant"`
 	Backend   string        `json:"backend,omitempty"`
 	Attempts  uint32        `json:"attempts,omitempty"`
 	ErrorCode string        `json:"error,omitempty"`
@@ -47,7 +50,11 @@ func main() {
 	concurrency := flag.Int("concurrency", 16, "closed loop: concurrent clients")
 	requests := flag.Int("requests", 1000, "closed loop: total requests")
 	maxTokens := flag.Uint("max-tokens", 64, "tokens per request")
-	workload := flag.String("workload", "unique", "unique | shared-prefix (one long system prompt, varied questions)")
+	workload := flag.String("workload", "unique",
+		"unique | shared-prefix (one system prompt, varied questions) | tenants (one system prompt per tenant)")
+	tenants := flag.Int("tenants", 24, "tenants workload: number of distinct system prompts")
+	zipf := flag.Float64("zipf", 1.1, "tenants workload: Zipf exponent of tenant popularity (> 1; larger = more skewed)")
+	seed := flag.Uint64("seed", 1, "workload random seed")
 	timeout := flag.Duration("timeout", 30*time.Second, "per-request deadline")
 	label := flag.String("label", "", "name for this run in the summary")
 	out := flag.String("out", "", "write per-request results as JSON to this file")
@@ -61,7 +68,7 @@ func main() {
 	defer conn.Close()
 	client := pb.NewInferenceClient(conn)
 
-	prompt := prompts(*workload)
+	prompt := prompts(*workload, *tenants, *zipf, *seed)
 	var (
 		mu      sync.Mutex
 		results []result
@@ -71,7 +78,9 @@ func main() {
 	)
 	begin := time.Now()
 	fire := func(i int) {
-		r := one(client, prompt(i), uint32(*maxTokens), *timeout, begin)
+		text, tenant := prompt(i)
+		r := one(client, text, uint32(*maxTokens), *timeout, begin)
+		r.Tenant = tenant
 		mu.Lock()
 		results = append(results, r)
 		mu.Unlock()
@@ -132,6 +141,7 @@ func one(client pb.InferenceClient, prompt string, maxTokens uint32, timeout tim
 		}
 		if u := chunk.Usage; u != nil {
 			r.Tokens, r.Backend, r.Attempts = u.TokensGenerated, u.Backend, u.Attempts
+			r.Prompt, r.Reused = u.PromptTokens, u.BackendPrefixTokensReused
 		}
 	}
 	r.Latency = time.Since(start)
@@ -141,13 +151,47 @@ func one(client pb.InferenceClient, prompt string, maxTokens uint32, timeout tim
 	return r
 }
 
-func prompts(workload string) func(int) string {
+// Sentences tenants' system prompts are assembled from, in the model's domain.
+var sentences = []string{
+	"Alice was beginning to get very tired of sitting by her sister on the bank.",
+	"Once or twice she had peeped into the book her sister was reading.",
+	"It had no pictures or conversations in it, and what is the use of a book?",
+	"So she was considering in her own mind, as well as she could, for the hot day made her feel sleepy.",
+	"Suddenly a White Rabbit with pink eyes ran close by her.",
+	"There was nothing so very remarkable in that, nor did Alice think it so very much out of the way.",
+	"The Queen had only one way of settling all difficulties, great or small.",
+	"The Hatter opened his eyes very wide on hearing this, but all he said was nothing.",
+}
+
+// prompts returns the i-th prompt of the workload and the tenant it belongs to.
+func prompts(workload string, tenants int, zipf float64, seed uint64) func(int) (string, int) {
 	switch workload {
 	case "unique":
-		return func(i int) string { return fmt.Sprintf("Request %d: Alice was", i) }
+		return func(i int) (string, int) { return fmt.Sprintf("Request %d: Alice was", i), 0 }
 	case "shared-prefix":
 		system := "The Queen had only one way of settling all difficulties, great or small. "
-		return func(i int) string { return fmt.Sprintf("%sQuestion %d: Alice was", system, i) }
+		return func(i int) (string, int) { return fmt.Sprintf("%sQuestion %d: Alice was", system, i), 0 }
+	case "tenants":
+		// Each tenant has its own ~300-byte system prompt (about 80 tokens), distinct from its
+		// first bytes, followed by a short per-request question.
+		systems := make([]string, tenants)
+		for t := range systems {
+			var b strings.Builder
+			fmt.Fprintf(&b, "Tenant %02d instructions: ", t)
+			for k := 0; b.Len() < 300; k++ {
+				b.WriteString(sentences[(t+k*3)%len(sentences)])
+				b.WriteByte(' ')
+			}
+			systems[t] = b.String()
+		}
+		var mu sync.Mutex
+		z := rand.NewZipf(rand.New(rand.NewPCG(seed, seed)), zipf, 1, uint64(tenants-1))
+		return func(i int) (string, int) {
+			mu.Lock()
+			t := int(z.Uint64())
+			mu.Unlock()
+			return fmt.Sprintf("%sQuestion %d: Alice was", systems[t], i), t
+		}
 	}
 	fmt.Fprintf(os.Stderr, "unknown workload %q\n", workload)
 	os.Exit(2)
@@ -156,7 +200,7 @@ func prompts(workload string) func(int) string {
 
 func summarize(label string, rs []result, elapsed time.Duration) {
 	var ttft, lat []time.Duration
-	var tokens uint64
+	var tokens, promptTokens, reused uint64
 	errs := map[string]int{}
 	backends := map[string]int{}
 	retried := 0
@@ -168,6 +212,8 @@ func summarize(label string, rs []result, elapsed time.Duration) {
 		ttft = append(ttft, r.TTFT)
 		lat = append(lat, r.Latency)
 		tokens += uint64(r.Tokens)
+		promptTokens += uint64(r.Prompt)
+		reused += uint64(r.Reused)
 		backends[r.Backend]++
 		if r.Attempts > 1 {
 			retried++
@@ -181,6 +227,10 @@ func summarize(label string, rs []result, elapsed time.Duration) {
 	fmt.Printf("throughput %.1f req/s  %.0f tokens/s\n", float64(ok)/elapsed.Seconds(), float64(tokens)/elapsed.Seconds())
 	fmt.Printf("ttft     p50 %7.1fms  p95 %7.1fms  p99 %7.1fms\n", ms(pct(ttft, 50)), ms(pct(ttft, 95)), ms(pct(ttft, 99)))
 	fmt.Printf("latency  p50 %7.1fms  p95 %7.1fms  p99 %7.1fms\n", ms(pct(lat, 50)), ms(pct(lat, 95)), ms(pct(lat, 99)))
+	if promptTokens > 0 {
+		fmt.Printf("prefix   %.1f%% of prompt tokens reused from the engines' prefix caches\n",
+			100*float64(reused)/float64(promptTokens))
+	}
 	names := make([]string, 0, len(backends))
 	for b := range backends {
 		names = append(names, b)

@@ -29,11 +29,11 @@ func distinct(i int) string { return fmt.Sprintf("prompt %d", i) }
 
 func TestNew(t *testing.T) {
 	for _, name := range Names {
-		if _, err := New(name, pool(2)); err != nil {
+		if _, err := New(name, pool(2), PrefixConfig{}); err != nil {
 			t.Errorf("New(%q): %v", name, err)
 		}
 	}
-	if _, err := New("nope", pool(2)); err == nil {
+	if _, err := New("nope", pool(2), PrefixConfig{}); err == nil {
 		t.Error("unknown name accepted")
 	}
 }

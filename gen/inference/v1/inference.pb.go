@@ -175,8 +175,10 @@ type Usage struct {
 	BackendTtftMs    float64 `protobuf:"fixed64,8,opt,name=backend_ttft_ms,json=backendTtftMs,proto3" json:"backend_ttft_ms,omitempty"`
 	// Measured by the gateway: request received -> first chunk sent.
 	GatewayTtftMs float64 `protobuf:"fixed64,9,opt,name=gateway_ttft_ms,json=gatewayTtftMs,proto3" json:"gateway_ttft_ms,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Prompt tokens the backend copied from its prefix cache instead of prefilling.
+	BackendPrefixTokensReused uint32 `protobuf:"varint,10,opt,name=backend_prefix_tokens_reused,json=backendPrefixTokensReused,proto3" json:"backend_prefix_tokens_reused,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *Usage) Reset() {
@@ -272,6 +274,13 @@ func (x *Usage) GetGatewayTtftMs() float64 {
 	return 0
 }
 
+func (x *Usage) GetBackendPrefixTokensReused() uint32 {
+	if x != nil {
+		return x.BackendPrefixTokensReused
+	}
+	return 0
+}
+
 var File_inference_v1_inference_proto protoreflect.FileDescriptor
 
 const file_inference_v1_inference_proto_rawDesc = "" +
@@ -290,7 +299,7 @@ const file_inference_v1_inference_proto_rawDesc = "" +
 	"\x05_seed\"X\n" +
 	"\rGenerateChunk\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x123\n" +
-	"\x05usage\x18\x02 \x01(\v2\x1d.tinyserve.inference.v1.UsageR\x05usage\"\xc9\x02\n" +
+	"\x05usage\x18\x02 \x01(\v2\x1d.tinyserve.inference.v1.UsageR\x05usage\"\x8a\x03\n" +
 	"\x05Usage\x12#\n" +
 	"\rprompt_tokens\x18\x01 \x01(\rR\fpromptTokens\x12)\n" +
 	"\x10tokens_generated\x18\x02 \x01(\rR\x0ftokensGenerated\x12\x12\n" +
@@ -300,7 +309,9 @@ const file_inference_v1_inference_proto_rawDesc = "" +
 	"\x12backend_latency_ms\x18\x06 \x01(\x01R\x10backendLatencyMs\x12(\n" +
 	"\x10backend_queue_ms\x18\a \x01(\x01R\x0ebackendQueueMs\x12&\n" +
 	"\x0fbackend_ttft_ms\x18\b \x01(\x01R\rbackendTtftMs\x12&\n" +
-	"\x0fgateway_ttft_ms\x18\t \x01(\x01R\rgatewayTtftMs2i\n" +
+	"\x0fgateway_ttft_ms\x18\t \x01(\x01R\rgatewayTtftMs\x12?\n" +
+	"\x1cbackend_prefix_tokens_reused\x18\n" +
+	" \x01(\rR\x19backendPrefixTokensReused2i\n" +
 	"\tInference\x12\\\n" +
 	"\bGenerate\x12'.tinyserve.inference.v1.GenerateRequest\x1a%.tinyserve.inference.v1.GenerateChunk0\x01BIZGgithub.com/muralidhardon/tinyserve-gateway/gen/inference/v1;inferencev1b\x06proto3"
 

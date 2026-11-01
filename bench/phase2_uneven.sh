@@ -49,3 +49,4 @@ run() {
   for r in round_robin random least_loaded consistent_hash; do run "$r"; done
   echo '```'
 } | tee "$OUT/phase2_uneven.md"
+gzip -9f "$OUT"/phase2_uneven_*.json

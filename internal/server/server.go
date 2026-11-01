@@ -93,7 +93,8 @@ func (s *Server) Generate(req *pb.GenerateRequest, stream pb.Inference_GenerateS
 				PromptTokens: result.PromptTokens, TokensGenerated: result.TokensGenerated, Seed: result.Seed,
 				Backend: b.Name, Attempts: uint32(attempt),
 				BackendLatencyMs: result.LatencyMS, BackendQueueMs: result.QueueMS, BackendTtftMs: result.TTFTMS,
-				GatewayTtftMs: float64(ttft) / float64(time.Millisecond),
+				GatewayTtftMs:             float64(ttft) / float64(time.Millisecond),
+				BackendPrefixTokensReused: result.PrefixTokensReused,
 			}})
 		}
 		if ctx.Err() != nil {

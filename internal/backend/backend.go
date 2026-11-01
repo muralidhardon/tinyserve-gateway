@@ -35,6 +35,8 @@ type Result struct {
 	QueueMS         float64 `json:"queue_ms"`
 	TTFTMS          float64 `json:"ttft_ms"`
 	Seed            uint32  `json:"seed"`
+	// Absent from TinyServe builds without a prefix cache, and so 0.
+	PrefixTokensReused uint32 `json:"prefix_tokens_reused"`
 }
 
 // Kind classifies a failure so callers can decide whether to retry elsewhere.

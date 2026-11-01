@@ -31,6 +31,11 @@ func main() {
 	backends := flag.String("backends", "http://localhost:8000", "comma-separated TinyServe base URLs")
 	routerName := flag.String("router", "least_loaded", "routing strategy: "+strings.Join(router.Names, ", "))
 	scrapeInterval := flag.Duration("scrape-interval", 250*time.Millisecond, "how often to read each replica's /metrics")
+	var prefix router.PrefixConfig
+	flag.IntVar(&prefix.BlockBytes, "prefix-block-bytes", 64, "prefix_aware: bytes per prefix block")
+	flag.Float64Var(&prefix.LoadFactor, "prefix-load-factor", 1.25, "prefix_aware: how far above an even share a replica may be loaded and still win on cache affinity")
+	flag.IntVar(&prefix.Slack, "prefix-slack", 4, "prefix_aware: extra sequences above that share a replica may carry (-1 = none)")
+	flag.IntVar(&prefix.IndexBlocks, "prefix-index-blocks", 1<<16, "prefix_aware: prefix blocks remembered")
 	maxAttempts := flag.Int("max-attempts", 0, "replicas one request may try before its first token (0 = all)")
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "how long shutdown waits for open streams")
 	verbose := flag.Bool("v", false, "debug logging")
@@ -58,7 +63,7 @@ func main() {
 		log.Error("no backends given")
 		os.Exit(2)
 	}
-	rt, err := router.New(*routerName, pool)
+	rt, err := router.New(*routerName, pool, prefix)
 	if err != nil {
 		log.Error("router", "err", err)
 		os.Exit(2)

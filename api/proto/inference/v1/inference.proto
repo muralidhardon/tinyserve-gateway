@@ -42,4 +42,6 @@ message Usage {
   double backend_ttft_ms = 8;
   // Measured by the gateway: request received -> first chunk sent.
   double gateway_ttft_ms = 9;
+  // Prompt tokens the backend copied from its prefix cache instead of prefilling.
+  uint32 backend_prefix_tokens_reused = 10;
 }

@@ -20,10 +20,11 @@ type Router interface {
 }
 
 // Names lists the strategies New accepts.
-var Names = []string{"round_robin", "random", "least_loaded", "consistent_hash"}
+var Names = []string{"round_robin", "random", "least_loaded", "consistent_hash", "prefix_aware"}
 
-// New builds the named strategy over the gateway's replicas.
-func New(name string, backends []*backend.Backend) (Router, error) {
+// New builds the named strategy over the gateway's replicas. prefix only
+// applies to prefix_aware.
+func New(name string, backends []*backend.Backend, prefix PrefixConfig) (Router, error) {
 	switch name {
 	case "round_robin":
 		return &RoundRobin{}, nil
@@ -33,6 +34,8 @@ func New(name string, backends []*backend.Backend) (Router, error) {
 		return LeastLoaded{}, nil
 	case "consistent_hash":
 		return NewConsistentHash(backends, DefaultHashKeyBytes), nil
+	case "prefix_aware":
+		return NewPrefixAware(prefix), nil
 	}
 	return nil, fmt.Errorf("unknown router %q (want one of %v)", name, Names)
 }
@@ -143,7 +146,10 @@ func hash64(s string) uint64 {
 	h.Write([]byte(s))
 	// Finish with splitmix64 so near-identical keys ("name#1", "name#2")
 	// spread evenly around the ring.
-	x := h.Sum64()
+	return mix64(h.Sum64())
+}
+
+func mix64(x uint64) uint64 {
 	x ^= x >> 30
 	x *= 0xbf58476d1ce4e5b9
 	x ^= x >> 27

@@ -14,8 +14,58 @@ The full plan, from this skeleton to prefix-aware routing on Kubernetes, is in
 
 ## Results so far
 
-Three replicas, one of them slow; Poisson arrivals; 64 tokens per request.
-Client-side numbers from `cmd/loadgen`.
+All numbers are client-side, from `cmd/loadgen`, with Poisson arrivals and three
+replicas on one Apple M3 Pro laptop. Raw per-request data and setup for each
+table are in [`bench/results/`](bench/results/).
+
+### Prefix-aware routing (Phase 3)
+
+The workload is 24 tenants, each with its own ~85-token system prompt plus a
+short question, generating 16 tokens per request. Each TinyServe replica has a
+48-block prefix cache. The tenants' prefixes need about 120 blocks: more than
+one replica holds, but less than the fleet does. So whether a request finds its
+prefix cached depends on where it is routed.
+
+| 600 req/s, one hot tenant (Zipf 2.0, ~60% of traffic) | Prompt reused | p50 TTFT | p99 TTFT | p99 latency | Busiest replica |
+|---|---:|---:|---:|---:|---:|
+| least_loaded | 78.9% | 3.0 ms | 52.8 ms | 79.2 ms | 35% |
+| consistent_hash | 84.4% | 4.0 ms | 55.0 ms | 69.3 ms | 68% |
+| **prefix_aware** | **83.6%** | **3.6 ms** | **17.0 ms** | **21.9 ms** | **35%** |
+
+| 600 req/s, Zipf 1.1 | Prompt reused | p50 TTFT | p95 TTFT | p99 TTFT | Errors |
+|---|---:|---:|---:|---:|---:|
+| prefix cache off | 0% | 1,565 ms | 1,674 ms | 1,752 ms | 1,247 rejected |
+| round_robin | 57.3% | 4.7 ms | 23.2 ms | 39.1 ms | 0 |
+| least_loaded | 56.4% | 5.7 ms | 26.4 ms | 61.6 ms | 0 |
+| consistent_hash | 82.1% | 3.4 ms | 9.3 ms | 22.6 ms | 0 |
+| **prefix_aware** | **80.2%** | **3.4 ms** | **10.6 ms** | **22.5 ms** | **0** |
+
+Three findings, in order of size:
+
+1. **The engine's prefix cache matters most.** At 600 req/s, the fleet without
+   it is past capacity: prefill alone saturates it, so queues back up and 10% of
+   requests are shed. With it, every router keeps p50 TTFT under 6 ms. That is
+   TinyServe's half of the work.
+2. **Cache-affine routing raises prompt reuse from about 57% to about 82%**,
+   and cuts p95 TTFT about 2x compared with round-robin and least-loaded.
+   Load-blind and cache-blind routers spread every tenant over every replica,
+   and each replica's cache thrashes.
+3. **Bounded load is what separates prefix-aware routing from consistent
+   hashing.** Both hash on the prompt's start, so with moderate skew they tie.
+   When one tenant is hot, consistent hashing sends it all to one replica (68% of
+   traffic) and that replica's tail suffers. Prefix-aware routing spills the
+   overflow once a replica exceeds its bounded share, and the spill replica then
+   caches that prefix too. That keeps the hit rate and cuts p99 TTFT 3x.
+
+At 300 req/s with Zipf 1.1, the fleet has headroom and the gaps shrink:
+`prefix_aware` and `consistent_hash` both reach 82.5% reuse and 5.7 ms p95 TTFT,
+against 9.9 ms for round-robin
+([`phase3_prefix.md`](bench/results/phase3_prefix.md)). Reproduce with
+`bench/phase3_prefix.sh` (set `RATE`, `ZIPF`, `ROUTERS`).
+
+### Load-aware routing (Phase 2)
+
+Three replicas, one of them slow, 64 tokens per request.
 
 | Real TinyServe, 100 req/s, one replica uncached (~19x slower) | p95 TTFT | p95 latency | Timeouts | Throughput |
 |---|---:|---:|---:|---:|
@@ -34,15 +84,39 @@ can serve, so its queue grows until it answers 503 and requests fail over (or,
 on the real engine, wait past their deadline). Least-loaded sees the queue in
 the replica's `/metrics` and sends it only what it can absorb (6% of traffic on
 the real engine, 18% on the fakes). Consistent hashing is no better than
-round-robin here: it pins keys, not load, which is what Phase 3's bounded-load
-prefix routing addresses.
+round-robin here, because it pins keys, not load.
 
-The real-engine slow replica is an extreme case (an uncached replica), and
-everything ran on one laptop. Raw per-request data and setup:
-[`bench/results/`](bench/results/). Reproduce the fake run with
-`bench/phase2_uneven.sh`.
+The real-engine slow replica is an extreme case (an uncached replica).
+Reproduce the fake run with `bench/phase2_uneven.sh`.
 
 ## Status
+
+**Phase 3 (done): prefix cache in the engine, prefix-aware routing**
+
+- TinyServe ([`streaming` branch](https://github.com/muralidhardon/tinyserve))
+  has a prefix cache. K/V rows of prompt prefixes are shared across requests in
+  16-token blocks, keyed by chained hashes, with LRU eviction. Reuse is exact,
+  and TTFT for a prompt with a cached 64-token prefix drops 5.7–7x at the engine.
+- `-router prefix_aware` keeps an index of chained hashes of 64-byte prompt
+  blocks, each mapped to the replicas recently sent that prefix. The gateway has
+  no tokenizer, so 64 bytes stands in for roughly one 16-token engine block. A
+  request goes to the replica with the longest match, with ties going to the
+  most recent owner, so prefixes don't hop between replicas.
+- That choice is bounded: the replica may hold at most
+  `ceil(1.25 × (total+1) / n) + 4` sequences
+  ([consistent hashing with bounded loads](https://arxiv.org/abs/1608.01350),
+  plus slack). The slack is there because continuous batching makes a few extra
+  sequences nearly free, while a cache miss costs a full prefill. Over the
+  bound, or with no match, the request falls back to least-loaded, and the
+  chosen replica is recorded as an owner too.
+- The index is LRU-bounded (65,536 blocks by default), with roots refreshed
+  after their descendants so a prefix's start is evicted last. One routing
+  decision takes about 1.3 µs for a 600-byte prompt.
+- The index predicts the engines' caches but doesn't mirror them. The engines
+  report what they actually reused (`backend_prefix_tokens_reused` in `Usage`),
+  and that is the hit rate the tables show.
+- `loadgen -workload tenants` generates Zipf-popular tenants with their own
+  system prompts.
 
 **Phase 2 (done): load-aware routing**
 
@@ -86,8 +160,8 @@ everything ran on one laptop. Raw per-request data and setup:
 
 **Requires** TinyServe's `POST /generate/stream` endpoint (server-sent events).
 
-**Next**: a prefix cache in the engine with bounded-load prefix-aware routing
-(Phase 3), then health checks, outlier ejection and circuit breaking (Phase 4).
+**Next**: health checks, outlier ejection and circuit breaking (Phase 4), then
+Kubernetes (Phase 5).
 Until then a dead replica costs one failed connection attempt per second with
 the load-aware routers, and one per request routed to it first with
 `round_robin` and `random`.
@@ -127,7 +201,10 @@ Server reflection is on, so `grpcurl -plaintext localhost:9000 list` works.
 |---|---|---|
 | `-listen` | `:9000` | gRPC address |
 | `-backends` | `http://localhost:8000` | Comma-separated TinyServe base URLs |
-| `-router` | `least_loaded` | `round_robin`, `random`, `least_loaded`, `consistent_hash` |
+| `-router` | `least_loaded` | `round_robin`, `random`, `least_loaded`, `consistent_hash`, `prefix_aware` |
+| `-prefix-block-bytes` | `64` | `prefix_aware`: bytes per prefix block |
+| `-prefix-load-factor`, `-prefix-slack` | `1.25`, `4` | `prefix_aware`: the load bound above |
+| `-prefix-index-blocks` | `65536` | `prefix_aware`: prefix blocks remembered |
 | `-scrape-interval` | `250ms` | How often to read each replica's `/metrics` |
 | `-max-attempts` | `0` (all) | Replicas one request may try before its first token |
 | `-drain-timeout` | `30s` | How long SIGTERM waits for open streams |
@@ -152,7 +229,7 @@ cmd/tsctl/            CLI client
 cmd/loadgen/          load generator
 bench/                benchmark scripts and raw results
 internal/backend/     TinyServe SSE client, /metrics scraping, load and overload state
-internal/router/      round-robin, random, least-loaded (P2C), consistent hash
+internal/router/      round-robin, random, least-loaded (P2C), consistent hash, prefix-aware
 internal/server/      gRPC service: routing, failover, error mapping
 internal/fakebackend/ fake replica, shared by tests and cmd/fakebackend
 ```

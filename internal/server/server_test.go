@@ -50,7 +50,7 @@ func startGatewayWith(t *testing.T, rs []replica, routerName string) pb.Inferenc
 	for _, r := range rs {
 		pool = append(pool, backend.New(r.http.URL, nil))
 	}
-	rt, err := router.New(routerName, pool)
+	rt, err := router.New(routerName, pool, router.PrefixConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,14 +224,20 @@ func TestDeadReplicaDoesNotAttractLeastLoadedTraffic(t *testing.T) {
 	rs := startReplicas(t, fakebackend.Config{}, fakebackend.Config{})
 	rs[0].http.Close()
 	c := startGatewayWith(t, rs, "least_loaded")
-	for i := 0; i < 20; i++ {
+	// P2C may not sample the dead replica on the first request, so it is not
+	// known which request discovers it; only that just one does.
+	retried := 0
+	for i := 0; i < 40; i++ {
 		_, u, err := generate(context.Background(), c, &pb.GenerateRequest{Prompt: "x", MaxTokens: 4})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if i > 0 && u.Attempts != 1 {
-			t.Fatalf("request %d tried the dead replica again (attempts=%d)", i, u.Attempts)
+		if u.Attempts > 1 {
+			retried++
 		}
+	}
+	if retried > 1 {
+		t.Fatalf("%d requests tried the dead replica first, want at most 1", retried)
 	}
 }
 
