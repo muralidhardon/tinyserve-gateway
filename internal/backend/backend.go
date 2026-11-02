@@ -209,13 +209,13 @@ func parseLoad(r io.Reader) (queue, active int64, err error) {
 	return queue, active, nil
 }
 
-// ScrapeLoop scrapes every backend each interval until ctx is done. A replica
-// that can't be scraped keeps its last figures.
-func ScrapeLoop(ctx context.Context, backends []*Backend, interval time.Duration, onErr func(*Backend, error)) {
+// ScrapeLoop scrapes every backend that backends returns each interval until
+// ctx is done. A replica that can't be scraped keeps its last figures.
+func ScrapeLoop(ctx context.Context, backends func() []*Backend, interval time.Duration, onErr func(*Backend, error)) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
-		for _, b := range backends {
+		for _, b := range backends() {
 			go func() {
 				sctx, cancel := context.WithTimeout(ctx, interval)
 				defer cancel()

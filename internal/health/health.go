@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/muralidhardon/tinyserve-gateway/internal/backend"
+	"github.com/muralidhardon/tinyserve-gateway/internal/pool"
 )
 
 type Config struct {
@@ -43,11 +44,11 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// Monitor tracks the health of a fixed pool of replicas. A nil *Monitor
-// treats every replica as healthy.
+// Monitor tracks the health of a pool of replicas, which may change. A nil
+// *Monitor treats every replica as healthy.
 type Monitor struct {
 	cfg  Config
-	pool []*backend.Backend
+	pool pool.Source
 	now  func() time.Time
 
 	mu    sync.Mutex
@@ -63,7 +64,7 @@ type state struct {
 	failedReqs   int
 }
 
-func New(cfg Config, pool []*backend.Backend) *Monitor {
+func New(cfg Config, src pool.Source) *Monitor {
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = time.Second
 	}
@@ -82,11 +83,17 @@ func New(cfg Config, pool []*backend.Backend) *Monitor {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	m := &Monitor{cfg: cfg, pool: pool, now: time.Now, state: map[*backend.Backend]*state{}}
-	for _, b := range pool {
-		m.state[b] = &state{}
+	return &Monitor{cfg: cfg, pool: src, now: time.Now, state: map[*backend.Backend]*state{}}
+}
+
+// stateLocked returns b's state, creating it for a replica new to the pool.
+func (m *Monitor) stateLocked(b *backend.Backend) *state {
+	s := m.state[b]
+	if s == nil {
+		s = &state{}
+		m.state[b] = s
 	}
-	return m
+	return s
 }
 
 // Run performs active checks every Interval until ctx is done.
@@ -108,9 +115,10 @@ func (m *Monitor) Run(ctx context.Context) {
 
 // checkAll checks every replica concurrently and applies the results.
 func (m *Monitor) checkAll(ctx context.Context) {
-	errs := make([]error, len(m.pool))
+	replicas := m.pool.Backends()
+	errs := make([]error, len(replicas))
 	var wg sync.WaitGroup
-	for i, b := range m.pool {
+	for i, b := range replicas {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -126,8 +134,17 @@ func (m *Monitor) checkAll(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
-	for i, b := range m.pool {
-		s := m.state[b]
+	current := make(map[*backend.Backend]bool, len(replicas))
+	for _, b := range replicas {
+		current[b] = true
+	}
+	for b := range m.state {
+		if !current[b] {
+			delete(m.state, b) // left the pool
+		}
+	}
+	for i, b := range replicas {
+		s := m.stateLocked(b)
 		if errs[i] == nil {
 			s.failedChecks = 0
 			if s.ejected && !now.Before(s.until) {
@@ -150,8 +167,8 @@ func (m *Monitor) Observe(b *backend.Backend, err error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	s := m.state[b]
-	if s == nil || s.ejected {
+	s := m.stateLocked(b)
+	if s.ejected {
 		return
 	}
 	if err == nil {
@@ -166,7 +183,7 @@ func (m *Monitor) Observe(b *backend.Backend, err error) {
 	if s.failedReqs < m.cfg.ConsecutiveFailures {
 		return
 	}
-	if m.ejectedLocked()+1 > int(m.cfg.MaxEjectedFraction*float64(len(m.pool))) {
+	if m.ejectedLocked()+1 > int(m.cfg.MaxEjectedFraction*float64(len(m.pool.Backends()))) {
 		return // keep counting; eject once another replica is re-admitted
 	}
 	m.eject(b, s, m.now(), "consecutive request failures", err)

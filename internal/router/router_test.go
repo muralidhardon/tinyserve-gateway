@@ -159,3 +159,26 @@ func TestConsistentHashSkipsOverloadedOwner(t *testing.T) {
 		t.Fatal("still routed to the overloaded owner")
 	}
 }
+
+func TestConsistentHashUpdateMovesFewKeys(t *testing.T) {
+	bs := pool(4)
+	c := NewConsistentHash(bs[:3], DefaultHashKeyBytes)
+	before := map[string]*backend.Backend{}
+	for i := range 1000 {
+		k := fmt.Sprintf("key %d", i)
+		before[k] = c.Pick(k, bs[:3])
+	}
+	c.Update(bs) // a fourth replica joins
+	moved := 0
+	for k, b := range before {
+		if got := c.Pick(k, bs); got != b {
+			if got != bs[3] {
+				t.Fatalf("%q moved between existing replicas", k)
+			}
+			moved++
+		}
+	}
+	if moved < 150 || moved > 350 {
+		t.Fatalf("%d of 1000 keys moved to the new replica, want about 250", moved)
+	}
+}

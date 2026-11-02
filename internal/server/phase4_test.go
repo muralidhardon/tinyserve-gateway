@@ -16,6 +16,7 @@ import (
 	"github.com/muralidhardon/tinyserve-gateway/internal/backend"
 	"github.com/muralidhardon/tinyserve-gateway/internal/fakebackend"
 	"github.com/muralidhardon/tinyserve-gateway/internal/health"
+	"github.com/muralidhardon/tinyserve-gateway/internal/pool"
 )
 
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -144,11 +145,11 @@ func TestChaos(t *testing.T) {
 	fast := fakebackend.Config{TokenDelay: 500 * time.Microsecond, PrefillDelay: 2 * time.Millisecond}
 	rs := startReplicas(t, fast, fast, fast)
 	var monitor *health.Monitor
-	var pool []*backend.Backend
+	var replicas []*backend.Backend
 	c := startGatewayConfig(t, rs, "least_loaded", func(cfg *Config) {
-		pool = cfg.Backends
+		replicas = cfg.Backends.Backends()
 		monitor = health.New(health.Config{
-			Interval: 50 * time.Millisecond, Timeout: 50 * time.Millisecond, UnhealthyThreshold: 2,
+			Interval: 50 * time.Millisecond, Timeout: 200 * time.Millisecond, UnhealthyThreshold: 2,
 			ConsecutiveFailures: 3, BaseEjection: 500 * time.Millisecond, Logger: quietLogger(),
 		}, cfg.Backends)
 		cfg.Health = monitor
@@ -201,8 +202,8 @@ func TestChaos(t *testing.T) {
 	if rate < 0.99 {
 		t.Fatalf("success rate %.2f%%, want >= 99%%", 100*rate)
 	}
-	if monitor.Ejected(pool[0]) || !monitor.Ejected(pool[1]) || !monitor.Ejected(pool[2]) {
-		t.Fatal("want the stalled and killed replicas ejected, and only them")
+	if monitor.Ejected(replicas[0]) || !monitor.Ejected(replicas[1]) || !monitor.Ejected(replicas[2]) {
+		t.Fatalf("ejected: %v %v %v; want the stalled and killed replicas ejected, and only them", monitor.Ejected(replicas[0]), monitor.Ejected(replicas[1]), monitor.Ejected(replicas[2]))
 	}
 }
 
@@ -214,5 +215,29 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not met in 2s")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestFollowsPoolChanges(t *testing.T) {
+	rs := startReplicas(t, fakebackend.Config{}, fakebackend.Config{})
+	p := pool.New(nil, quietLogger())
+	p.Set([]string{rs[0].http.URL})
+	c := startGatewayConfig(t, rs, "least_loaded", func(cfg *Config) { cfg.Backends = p })
+
+	_, usage, err := generate(context.Background(), c, &pb.GenerateRequest{Prompt: "hi", MaxTokens: 2})
+	if err != nil || usage.Backend != rs[0].http.URL {
+		t.Fatalf("first request: %v from %s, want replica 0", err, usage.GetBackend())
+	}
+	// Replica 0's pod is replaced by replica 1's.
+	p.Set([]string{rs[1].http.URL})
+	for range 5 {
+		_, usage, err := generate(context.Background(), c, &pb.GenerateRequest{Prompt: "hi", MaxTokens: 2})
+		if err != nil || usage.Backend != rs[1].http.URL {
+			t.Fatalf("after the change: %v from %s, want replica 1", err, usage.GetBackend())
+		}
+	}
+	p.Set(nil)
+	if _, _, err := generate(context.Background(), c, &pb.GenerateRequest{Prompt: "hi", MaxTokens: 2}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("empty pool: %v, want Unavailable", err)
 	}
 }

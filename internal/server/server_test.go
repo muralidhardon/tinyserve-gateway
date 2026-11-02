@@ -21,6 +21,7 @@ import (
 	pb "github.com/muralidhardon/tinyserve-gateway/gen/inference/v1"
 	"github.com/muralidhardon/tinyserve-gateway/internal/backend"
 	"github.com/muralidhardon/tinyserve-gateway/internal/fakebackend"
+	"github.com/muralidhardon/tinyserve-gateway/internal/pool"
 	"github.com/muralidhardon/tinyserve-gateway/internal/router"
 )
 
@@ -54,15 +55,15 @@ func startGatewayWith(t *testing.T, rs []replica, routerName string) pb.Inferenc
 // the server's Config before it starts.
 func startGatewayConfig(t *testing.T, rs []replica, routerName string, configure func(*Config)) pb.InferenceClient {
 	t.Helper()
-	var pool []*backend.Backend
+	var replicas pool.Static
 	for _, r := range rs {
-		pool = append(pool, backend.New(r.http.URL, nil))
+		replicas = append(replicas, backend.New(r.http.URL, nil))
 	}
-	rt, err := router.New(routerName, pool, router.PrefixConfig{})
+	rt, err := router.New(routerName, replicas, router.PrefixConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Backends: pool, Router: rt, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	cfg := Config{Backends: replicas, Router: rt, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	if configure != nil {
 		configure(&cfg)
 	}

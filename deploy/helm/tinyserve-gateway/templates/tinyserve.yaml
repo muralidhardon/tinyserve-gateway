@@ -1,0 +1,109 @@
+# TinyServe replicas. The gateway finds them through the headless Service's
+# EndpointSlices and routes to each pod itself; nothing load-balances through
+# the Service's virtual IP.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tsg.tinyserve" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tinyserve
+spec:
+  clusterIP: None
+  selector:
+    {{- include "tsg.selector" (dict "root" . "component" "tinyserve") | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tsg.tinyserve" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tinyserve
+spec:
+  {{- if eq .Values.autoscaling.type "none" }}
+  replicas: {{ .Values.tinyserve.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "tsg.selector" (dict "root" . "component" "tinyserve") | nindent 6 }}
+  strategy:
+    # Bring the new pod up (and ready) before taking an old one down.
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  template:
+    metadata:
+      labels:
+        {{- include "tsg.labels" . | nindent 8 }}
+        app.kubernetes.io/component: tinyserve
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      terminationGracePeriodSeconds: {{ .Values.tinyserve.terminationGracePeriodSeconds }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "tsg.selector" (dict "root" . "component" "tinyserve") | nindent 20 }}
+      containers:
+        - name: tinyserve
+          image: "{{ .Values.tinyserve.image.repository }}:{{ .Values.tinyserve.image.tag }}"
+          imagePullPolicy: {{ .Values.tinyserve.image.pullPolicy }}
+          ports:
+            - {name: http, containerPort: 8000}
+          env:
+            {{- range $k, $v := .Values.tinyserve.env }}
+            - {name: {{ $k }}, value: {{ $v | quote }}}
+            {{- end }}
+          # The model loads at import, before uvicorn listens, so /health
+          # answering means the replica can serve.
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 1
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 2
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          {{- if gt (int .Values.tinyserve.preStopSleepSeconds) 0 }}
+          lifecycle:
+            # On deletion the endpoint turns not-ready at once and the gateway
+            # stops sending new streams; the sleep gives that time to land
+            # before uvicorn stops accepting. SIGTERM then lets open streams
+            # finish.
+            preStop:
+              sleep: {seconds: {{ .Values.tinyserve.preStopSleepSeconds }}}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.tinyserve.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            # The image's USER is a name; the kubelet needs a number to verify non-root.
+            runAsUser: 10001
+            runAsNonRoot: true
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tsg.tinyserve" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.tinyserve.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "tsg.selector" (dict "root" . "component" "tinyserve") | nindent 6 }}

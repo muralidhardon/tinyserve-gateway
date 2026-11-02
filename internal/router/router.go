@@ -95,7 +95,7 @@ const vnodesPerBackend = 128
 // replica is excluded or avoided, the next one clockwise takes the request.
 type ConsistentHash struct {
 	keyBytes int
-	ring     []vnode // sorted by hash
+	ring     atomic.Pointer[[]vnode] // sorted by hash
 }
 
 type vnode struct {
@@ -105,13 +105,22 @@ type vnode struct {
 
 func NewConsistentHash(backends []*backend.Backend, keyBytes int) *ConsistentHash {
 	c := &ConsistentHash{keyBytes: keyBytes}
+	c.Update(backends)
+	return c
+}
+
+// Update rebuilds the ring for a new set of replicas. A replica's virtual
+// nodes depend only on its name, so keys move only to or from the replicas
+// that were added or removed.
+func (c *ConsistentHash) Update(backends []*backend.Backend) {
+	ring := make([]vnode, 0, len(backends)*vnodesPerBackend)
 	for _, b := range backends {
 		for i := 0; i < vnodesPerBackend; i++ {
-			c.ring = append(c.ring, vnode{hash64(b.Name + "#" + strconv.Itoa(i)), b})
+			ring = append(ring, vnode{hash64(b.Name + "#" + strconv.Itoa(i)), b})
 		}
 	}
-	sort.Slice(c.ring, func(i, j int) bool { return c.ring[i].hash < c.ring[j].hash })
-	return c
+	sort.Slice(ring, func(i, j int) bool { return ring[i].hash < ring[j].hash })
+	c.ring.Store(&ring)
 }
 
 func (c *ConsistentHash) Pick(prompt string, candidates []*backend.Backend) *backend.Backend {
@@ -120,11 +129,12 @@ func (c *ConsistentHash) Pick(prompt string, candidates []*backend.Backend) *bac
 		key = key[:c.keyBytes]
 	}
 	h := hash64(key)
-	start := sort.Search(len(c.ring), func(i int) bool { return c.ring[i].hash >= h })
+	ring := *c.ring.Load()
+	start := sort.Search(len(ring), func(i int) bool { return ring[i].hash >= h })
 
 	var fallback *backend.Backend
-	for k := 0; k < len(c.ring); k++ {
-		b := c.ring[(start+k)%len(c.ring)].backend
+	for k := 0; k < len(ring); k++ {
+		b := ring[(start+k)%len(ring)].backend
 		if !slices.Contains(candidates, b) {
 			continue
 		}
@@ -138,7 +148,7 @@ func (c *ConsistentHash) Pick(prompt string, candidates []*backend.Backend) *bac
 	if fallback != nil {
 		return fallback
 	}
-	return candidates[0] // a candidate not on the ring; can't happen with a static pool
+	return candidates[0] // added to the pool and not yet on the ring
 }
 
 func hash64(s string) uint64 {

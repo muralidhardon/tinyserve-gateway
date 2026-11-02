@@ -25,6 +25,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/resolver/dns"
 	"google.golang.org/grpc/status"
 
 	pb "github.com/muralidhardon/tinyserve-gateway/gen/inference/v1"
@@ -44,7 +45,8 @@ type result struct {
 }
 
 func main() {
-	addr := flag.String("addr", "localhost:9000", "gateway address")
+	addr := flag.String("addr", "localhost:9000", "gateway address, e.g. dns:///gateway-headless:9000 to resolve every gateway pod")
+	balance := flag.String("balance", "pick_first", "gRPC load balancing over the addresses addr resolves to: pick_first | round_robin")
 	rate := flag.Float64("rate", 0, "open loop: requests per second (Poisson arrivals)")
 	duration := flag.Duration("duration", 10*time.Second, "open loop: how long to send")
 	concurrency := flag.Int("concurrency", 16, "closed loop: concurrent clients")
@@ -59,9 +61,20 @@ func main() {
 	label := flag.String("label", "", "name for this run in the summary")
 	out := flag.String("out", "", "write per-request results as JSON to this file")
 	timeline := flag.Duration("timeline", 0, "also print results per interval of send time, e.g. 1s")
+	dnsInterval := flag.Duration("dns-min-interval", 0,
+		"dns:/// addresses: shortest gap between re-resolutions (0 = gRPC's default, 30s)")
 	flag.Parse()
 
-	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// gRPC re-resolves a dns:/// name when a connection drops, but at most
+	// once per interval. In a rolling update the gateway pods go one after
+	// another, so with the default 30s the second pod's departure leaves the
+	// client with only stale addresses until the interval passes.
+	if *dnsInterval > 0 {
+		dns.SetMinResolutionInterval(*dnsInterval)
+	}
+
+	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultServiceConfig(fmt.Sprintf(`{"loadBalancingConfig": [{%q: {}}]}`, *balance)))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

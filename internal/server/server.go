@@ -16,6 +16,7 @@ import (
 	pb "github.com/muralidhardon/tinyserve-gateway/gen/inference/v1"
 	"github.com/muralidhardon/tinyserve-gateway/internal/backend"
 	"github.com/muralidhardon/tinyserve-gateway/internal/health"
+	"github.com/muralidhardon/tinyserve-gateway/internal/pool"
 	"github.com/muralidhardon/tinyserve-gateway/internal/router"
 )
 
@@ -25,10 +26,11 @@ const (
 )
 
 type Config struct {
-	Backends []*backend.Backend
+	// Backends lists the replicas; it may change between requests.
+	Backends pool.Source
 	Router   router.Router
 	// MaxAttempts bounds how many replicas one request may try before its
-	// first token. Defaults to every replica.
+	// first token. 0 means every replica.
 	MaxAttempts int
 	// Health filters out ejected replicas and is told how each attempt went.
 	// Nil means every replica is always eligible.
@@ -60,9 +62,6 @@ type Server struct {
 var errNoFirstToken = errors.New("no first token")
 
 func New(cfg Config) *Server {
-	if cfg.MaxAttempts <= 0 {
-		cfg.MaxAttempts = len(cfg.Backends)
-	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -98,8 +97,13 @@ func (s *Server) Generate(req *pb.GenerateRequest, stream pb.Inference_GenerateS
 		lastErr error
 		ttft    time.Duration
 	)
-	for attempt := 1; attempt <= s.cfg.MaxAttempts; attempt++ {
-		candidates := slices.DeleteFunc(slices.Clone(s.cfg.Backends), func(b *backend.Backend) bool {
+	all := s.cfg.Backends.Backends()
+	maxAttempts := len(all)
+	if s.cfg.MaxAttempts > 0 {
+		maxAttempts = min(maxAttempts, s.cfg.MaxAttempts)
+	}
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		candidates := slices.DeleteFunc(slices.Clone(all), func(b *backend.Backend) bool {
 			return slices.Contains(tried, b)
 		})
 		if len(candidates) == 0 {

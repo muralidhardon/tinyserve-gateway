@@ -11,6 +11,7 @@ import (
 
 	"github.com/muralidhardon/tinyserve-gateway/internal/backend"
 	"github.com/muralidhardon/tinyserve-gateway/internal/fakebackend"
+	"github.com/muralidhardon/tinyserve-gateway/internal/pool"
 )
 
 // clock is a settable time source.
@@ -37,7 +38,7 @@ func newFixture(t *testing.T, n int, cfg Config) *fixture {
 		f.pool = append(f.pool, backend.New(h.URL, nil))
 	}
 	cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	f.m = New(cfg, f.pool)
+	f.m = New(cfg, pool.Static(f.pool))
 	f.m.now = f.clk.now
 	return f
 }

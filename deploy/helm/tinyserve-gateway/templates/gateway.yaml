@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "tsg.gateway" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+---
+# The gateway only needs to watch EndpointSlices, in its own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tsg.gateway" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tsg.gateway" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "tsg.gateway" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tsg.gateway" . }}
+---
+# For clients that open one connection: a ClusterIP Service balances
+# connections, not requests, so each client sticks to one gateway pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tsg.gateway" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  selector:
+    {{- include "tsg.selector" (dict "root" . "component" "gateway") | nindent 4 }}
+  ports:
+    - {name: grpc, port: 9000, targetPort: grpc, appProtocol: kubernetes.io/h2c}
+---
+# For gRPC clients that balance themselves: dns:///<this>:9000 with
+# round_robin resolves every ready gateway pod and spreads requests across them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tsg.gateway" . }}-headless
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  clusterIP: None
+  selector:
+    {{- include "tsg.selector" (dict "root" . "component" "gateway") | nindent 4 }}
+  ports:
+    - {name: grpc, port: 9000, targetPort: grpc}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tsg.gateway" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector:
+    matchLabels:
+      {{- include "tsg.selector" (dict "root" . "component" "gateway") | nindent 6 }}
+  strategy:
+    rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+  template:
+    metadata:
+      labels:
+        {{- include "tsg.labels" . | nindent 8 }}
+        app.kubernetes.io/component: gateway
+    spec:
+      serviceAccountName: {{ include "tsg.gateway" . }}
+      terminationGracePeriodSeconds: {{ add .Values.gateway.drainTimeoutSeconds .Values.gateway.preStopSleepSeconds 5 }}
+      containers:
+        - name: gateway
+          image: "{{ .Values.gateway.image.repository }}:{{ .Values.gateway.image.tag }}"
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          args:
+            - -listen=:9000
+            - -k8s-service={{ include "tsg.tinyserve" . }}
+            - -k8s-port=http
+            - -router={{ .Values.gateway.router }}
+            - -drain-timeout={{ .Values.gateway.drainTimeoutSeconds }}s
+            {{- range .Values.gateway.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - {name: grpc, containerPort: 9000}
+          # The gRPC health service: NOT_SERVING until discovery finds a
+          # replica, and again once SIGTERM starts the drain.
+          readinessProbe:
+            grpc: {port: 9000}
+            periodSeconds: 2
+          livenessProbe:
+            grpc: {port: 9000}
+            periodSeconds: 10
+            failureThreshold: 3
+          {{- if gt (int .Values.gateway.preStopSleepSeconds) 0 }}
+          lifecycle:
+            preStop:
+              sleep: {seconds: {{ .Values.gateway.preStopSleepSeconds }}}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tsg.gateway" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "tsg.selector" (dict "root" . "component" "gateway") | nindent 6 }}

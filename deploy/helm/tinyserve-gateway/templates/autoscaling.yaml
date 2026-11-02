@@ -1,0 +1,47 @@
+{{- $a := .Values.autoscaling }}
+{{- if eq $a.type "cpu" }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "tsg.tinyserve" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ include "tsg.tinyserve" . }}}
+  minReplicas: {{ $a.minReplicas }}
+  maxReplicas: {{ $a.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ $a.cpu.targetUtilization }}}
+{{- else if eq $a.type "keda" }}
+# Scales TinyServe on its own load signal: sequences queued plus running,
+# summed over the replicas. KEDA turns this into an HPA whose target is
+# targetSequencesPerReplica per pod. CPU is a poor proxy here: a replica at
+# full batch with a growing queue and one at full batch with none use the
+# same CPU.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "tsg.tinyserve" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef: {name: {{ include "tsg.tinyserve" . }}}
+  minReplicaCount: {{ $a.minReplicas }}
+  maxReplicaCount: {{ $a.maxReplicas }}
+  pollingInterval: {{ $a.keda.pollingInterval }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: {{ $a.keda.scaleDownStabilizationSeconds }}
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ $a.keda.prometheusAddress }}
+        {{- $sel := printf "namespace=%q,app_kubernetes_io_instance=%q,app_kubernetes_io_component=\"tinyserve\"" .Release.Namespace .Release.Name }}
+        query: sum(tinyserve_queue_depth{ {{- $sel -}} }) + sum(tinyserve_active_sequences{ {{- $sel -}} })
+        threshold: {{ $a.keda.targetSequencesPerReplica | quote }}
+{{- end }}

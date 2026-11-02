@@ -1,0 +1,54 @@
+gateway:
+  image:
+    repository: tinyserve-gateway
+    tag: dev
+    pullPolicy: IfNotPresent
+  replicas: 2
+  router: prefix_aware
+  # Seconds SIGTERM waits for open streams before closing them.
+  drainTimeoutSeconds: 20
+  # Seconds a terminating pod keeps serving before SIGTERM, so clients and
+  # Services stop picking it before it stops accepting.
+  preStopSleepSeconds: 5
+  # Extra gateway flags, e.g. ["-max-inflight", "512", "-first-token-timeout", "3s"].
+  extraArgs: []
+  resources:
+    requests: {cpu: 250m, memory: 64Mi}
+    limits: {cpu: "1", memory: 256Mi}
+
+tinyserve:
+  image:
+    repository: tinyserve
+    tag: dev
+    pullPolicy: IfNotPresent
+  replicas: 2
+  env:
+    TINYSERVE_QUANT: f32
+    TINYSERVE_THREADS: "2"
+    TINYSERVE_MAX_BATCH: "16"
+    TINYSERVE_MAX_QUEUE: "256"
+    TINYSERVE_PREFIX_CACHE_BLOCKS: "512"
+  # TinyServe's uvicorn waits for open streams on SIGTERM; this bounds it.
+  terminationGracePeriodSeconds: 30
+  preStopSleepSeconds: 5
+  resources:
+    requests: {cpu: "1", memory: 256Mi}
+    limits: {cpu: "2", memory: 512Mi}
+  pdb:
+    minAvailable: 1
+
+autoscaling:
+  # none | cpu (HPA on CPU, no dependencies) | keda (KEDA + Prometheus, on
+  # TinyServe's own queue depth and running batch size)
+  type: none
+  minReplicas: 2
+  maxReplicas: 6
+  cpu:
+    targetUtilization: 70
+  keda:
+    prometheusAddress: http://prometheus-server.monitoring.svc
+    # Target sequences (queued + running) per replica. TinyServe batches up
+    # to TINYSERVE_MAX_BATCH; aiming below that leaves headroom.
+    targetSequencesPerReplica: 8
+    pollingInterval: 5
+    scaleDownStabilizationSeconds: 60

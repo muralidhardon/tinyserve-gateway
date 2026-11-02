@@ -14,9 +14,57 @@ The full plan, from this skeleton to prefix-aware routing on Kubernetes, is in
 
 ## Results so far
 
-All numbers are client-side, from `cmd/loadgen`, with Poisson arrivals and three
-replicas on one Apple M3 Pro laptop. Raw per-request data and setup for each
-table are in [`bench/results/`](bench/results/).
+All numbers are client-side, from `cmd/loadgen`, with Poisson arrivals, on one
+Apple M3 Pro laptop. Phases 2–4 ran three replicas as local processes; Phase 5
+ran on a 3-node kind cluster. Raw per-request data and setup for each table are
+in [`bench/results/`](bench/results/).
+
+### Rolling updates on Kubernetes (Phase 5)
+
+The setup is real TinyServe on a 3-node kind cluster: 2 TinyServe pods, 2
+gateway pods, and a loadgen pod in the cluster. Loadgen sends 100 req/s for
+75 s, 32 tokens per request. It uses gRPC `round_robin` over the gateways'
+headless Service, so it holds a connection to every gateway pod.
+
+At t=10 s every TinyServe pod is replaced (`kubectl rollout restart`). Once
+that finishes, every gateway pod is replaced too.
+
+| ~7,500 requests, every pod replaced | Failed | p99 TTFT | p99 latency |
+|---|---:|---:|---:|
+| no drain (preStop 0, 1 s grace period) | 2 | 53.4 ms | 104.5 ms |
+| drain, client re-resolves DNS at most every 30 s (gRPC default) | 768 (10%) | 39.7 ms | 84.1 ms |
+| **drain, client re-resolves DNS at most every 1 s** | **0** | 69.9 ms | 144.1 ms |
+
+- **The failures came from the client, not the gateway.** Every failure in
+  the second row falls in one ~8 s window, right after the gateway pods were
+  replaced:
+  - gRPC re-resolves a `dns:///` name when a connection drops, but at most
+    once per interval, and the default interval is 30 s.
+  - The first old gateway pod leaves, and the client re-resolves. It gets
+    the new pod and the second old pod.
+  - Seconds later the second old pod leaves. The 30 s interval hasn't passed,
+    so the client keeps only that stale address and every request fails with
+    `UNAVAILABLE`. That lasts until the interval passes.
+  - With `-dns-min-interval 1s`, the same rollout loses nothing. Any gRPC
+    client that balances over a headless Service in a rolling deployment
+    needs this setting, or something like xDS.
+- **Replacing TinyServe pods cost nothing in any run.**
+  - The gateway watches EndpointSlices. When a pod starts terminating, it is
+    marked not-ready and the gateway stops sending it new streams, while
+    streams already open finish.
+  - New pods join once their readiness probe passes.
+- **Drain barely mattered here, because the requests are short.** With
+  ~10 ms requests, few streams are open when a pod is killed. A request
+  refused by a pod that is shutting down fails over to another replica
+  before its first token, so even the no-drain run lost only 2 requests.
+  Long generations would leave more streams open at the moment of the kill;
+  that case is not measured here.
+- The p99 differences between rows are within run-to-run noise. A single
+  slow second (pods starting on the same 3 nodes) moves p99 by about 50 ms.
+
+Per-5-second timelines are in
+[`phase5_rollout.md`](bench/results/phase5_rollout.md). Reproduce with
+`deploy/kind/up.sh` then `bench/phase5_rollout.sh`.
 
 ### Fault tolerance (Phase 4)
 
@@ -134,6 +182,51 @@ The real-engine slow replica is an extreme case (an uncached replica).
 Reproduce the fake run with `bench/phase2_uneven.sh`.
 
 ## Status
+
+**Phase 5 (done): Kubernetes**
+
+- **Live replica pool.** The replica set can change while the gateway runs.
+  - A replica that stays across an update keeps its load figures, health
+    history and open streams.
+  - A removed replica finishes its open streams but gets no new ones.
+  - The consistent-hash ring is rebuilt on each change. Adding a fourth
+    replica moves about a quarter of keys.
+- **EndpointSlice discovery** (`-k8s-service`, using client-go informers):
+  - The gateway routes only to endpoints marked ready, so a terminating pod
+    stops getting new streams at once.
+  - It needs only `get`/`list`/`watch` on EndpointSlices in its own
+    namespace.
+  - Static `-backends` still works outside Kubernetes.
+- **Readiness.** The gateway's gRPC health service reports NOT_SERVING until
+  discovery finds a replica, and again once SIGTERM starts the drain.
+- **Helm chart** (`deploy/helm/tinyserve-gateway`):
+  - **TinyServe:** a headless Service, so the gateway can address each pod
+    directly. Plus startup, readiness and liveness probes on `/health`, a
+    `preStop` sleep, a non-root user, and soft anti-affinity across nodes.
+  - **Gateway:** a ServiceAccount with its Role, gRPC probes, a read-only root
+    filesystem, and a termination grace period sized to the drain timeout.
+  - **Both:** rolling updates that add a pod before removing one
+    (`maxSurge 1`, `maxUnavailable 0`), and PodDisruptionBudgets.
+  - **Two gateway Services.** A ClusterIP Service balances connections, not
+    requests, so a client's single HTTP/2 connection sticks to one gateway
+    pod. The second, headless Service lets gRPC clients balance requests
+    across every gateway pod themselves.
+- **Autoscaling**, chosen with `autoscaling.type`:
+  - `cpu`: a standard HorizontalPodAutoscaler.
+  - `keda`: a KEDA ScaledObject driven by Prometheus. It scales on TinyServe's
+    own queue depth plus active sequences (8 per replica by default).
+  - CPU is a poor signal for this engine: a replica with a full batch and a
+    long queue can sit at the same CPU use as one just keeping up.
+  - The chart installs both modes, but this README has no autoscaling numbers.
+- **One image** (distroless, non-root) holds the gateway, loadgen, tsctl and the
+  fake backend.
+- **kind setup:** `deploy/kind/up.sh` creates the cluster, builds and loads the
+  images, and installs the chart. With `AUTOSCALING=keda` it also installs
+  Prometheus and KEDA.
+- **Not built:**
+  - TLS between client, gateway and replicas.
+  - Topology-aware routing that prefers replicas in the gateway's own zone.
+  - Scaling the gateway itself on stream count.
 
 **Phase 4 (done): fault tolerance**
 
@@ -254,9 +347,8 @@ Reproduce the fake run with `bench/phase2_uneven.sh`.
 
 **Requires** TinyServe's `POST /generate/stream` endpoint (server-sent events).
 
-**Next**: Kubernetes (Phase 5): a Helm chart, replica discovery from
-EndpointSlices, drain on scale-down, and autoscaling. Then observability
-(Phase 6).
+**Next**: observability (Phase 6): Prometheus metrics from the gateway
+itself, and OpenTelemetry traces across gateway and replica.
 
 ## Run it
 
@@ -289,10 +381,26 @@ was thinking of a feafe a eanarre
 
 Server reflection is on, so `grpcurl -plaintext localhost:9000 list` works.
 
+On Kubernetes (local kind cluster; needs Docker, kind, kubectl and helm):
+
+```bash
+deploy/kind/up.sh                        # 3-node cluster, both images, the chart
+kubectl port-forward svc/ts-gateway 9000:9000 &
+bin/tsctl -max-tokens 40 "Alice was"
+kubectl scale deploy/ts-tinyserve --replicas 3   # the gateway picks it up within seconds
+kind delete cluster --name tinyserve
+```
+
+`deploy/kind/up.sh` expects the TinyServe checkout at `../tinyserve`
+(`TINYSERVE_DIR` to change it).
+
 | Gateway flag | Default | |
 |---|---|---|
 | `-listen` | `:9000` | gRPC address |
-| `-backends` | `http://localhost:8000` | Comma-separated TinyServe base URLs |
+| `-backends` | `http://localhost:8000` | Comma-separated TinyServe base URLs (ignored with `-k8s-service`) |
+| `-k8s-service` | | Discover replicas from this Service's EndpointSlices |
+| `-k8s-namespace` | the pod's own | Namespace of `-k8s-service` |
+| `-k8s-port` | `http` | Name of the Service port to send requests to |
 | `-router` | `least_loaded` | `round_robin`, `random`, `least_loaded`, `consistent_hash`, `prefix_aware` |
 | `-prefix-block-bytes` | `64` | `prefix_aware`: bytes per prefix block |
 | `-prefix-load-factor`, `-prefix-slack` | `1.25`, `4` | `prefix_aware`: the load bound above |
@@ -328,7 +436,11 @@ cmd/fakebackend/      fault-injecting TinyServe stand-in
 cmd/tsctl/            CLI client
 cmd/loadgen/          load generator
 bench/                benchmark scripts and raw results
+deploy/helm/          Helm chart: TinyServe, gateway, autoscaling
+deploy/kind/          local 3-node cluster and setup script
 internal/backend/     TinyServe SSE client, /metrics scraping, health check, load and overload state
+internal/pool/        the live replica set, shared by router, health checks and scraping
+internal/discovery/   replicas from Kubernetes EndpointSlices
 internal/health/      active health checks, outlier ejection with backoff
 internal/router/      round-robin, random, least-loaded (P2C), consistent hash, prefix-aware
 internal/server/      gRPC service: admission, routing, failover, retry budget, error mapping
