@@ -1,5 +1,14 @@
 # TinyServe Gateway: A Go Inference Gateway for TinyServe
 
+> **This is the original plan, kept as written.** What was built and measured
+> is in the [README](../README.md), and why it works that way is in
+> [DESIGN.md](DESIGN.md). Differences from the plan:
+> - The build ran in seven phases instead of the milestones below.
+> - There is no circuit breaker. Outlier ejection with backoff does that job.
+> - Autoscaling is configured but not verified.
+> - There is no cost model. The real engine's prefix cache made the routing
+>   wins measurable without one.
+
 > "I built the engine and the distributed system that serves it."
 
 [TinyServe](https://github.com/muralidhardon/tinyserve) is a from-scratch LLM inference server: a hand-written C engine (KV cache, continuous batching, int8 quantization, 100x faster than its NanoForge baseline) behind a FastAPI server with Prometheus metrics.
