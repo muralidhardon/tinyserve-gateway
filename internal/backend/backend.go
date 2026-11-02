@@ -85,7 +85,8 @@ type Backend struct {
 }
 
 // unreachableBackoff is how long a replica that refused a connection is
-// avoided. Phase 4's health checks will replace this with proper ejection.
+// avoided: the immediate reaction, before health checks or outlier detection
+// (package health) have seen enough failures to eject it.
 const unreachableBackoff = time.Second
 
 // New returns a client for the replica at baseURL. The http.Client should have
@@ -132,6 +133,24 @@ func retryAfter(header string) time.Duration {
 		return time.Duration(secs) * time.Second
 	}
 	return time.Second
+}
+
+// Check is an active health check: GET /health must answer 200.
+func (b *Backend) Check(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.Name+"/health", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096)) // so the connection is reused
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s/health: %s", b.Name, resp.Status)
+	}
+	return nil
 }
 
 // Scrape refreshes the replica's load from GET /metrics.

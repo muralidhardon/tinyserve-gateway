@@ -18,6 +18,50 @@ All numbers are client-side, from `cmd/loadgen`, with Poisson arrivals and three
 replicas on one Apple M3 Pro laptop. Raw per-request data and setup for each
 table are in [`bench/results/`](bench/results/).
 
+### Fault tolerance (Phase 4)
+
+Four fake replicas take 150 req/s, 64 tokens per request, with a 10 s client
+deadline. Partway through the run, one replica is frozen with `SIGSTOP` at
+t=8s, another is killed with `SIGKILL` at t=16s, and the frozen one is resumed
+with `SIGCONT` at t=24s. A frozen replica is the hard case. Its kernel still
+accepts connections, so nothing errors; requests just hang. In the "no
+protection" rows, Phase 4 is switched off, so the gateway behaves as it did
+after Phase 3.
+
+| 4,800+ requests, replica frozen then another killed | Failed | Retries | p95 TTFT | p99 TTFT |
+|---|---:|---:|---:|---:|
+| round_robin, no protection | 125 (2.5%) | 1,278 | 2,015 ms | 2,024 ms |
+| **round_robin, Phase 4** | **8 (0.16%)** | **77** | **19 ms** | 5,015 ms |
+| least_loaded, no protection | 13 | 16 | 16.5 ms | 36.8 ms |
+| **least_loaded, Phase 4** | **2** | **12** | **15.5 ms** | **30.1 ms** |
+
+- **Load-blind routing, no protection.** Round-robin keeps sending the frozen
+  replica a quarter of the traffic for the full 16 s:
+  - Each request waits for the 2 s connect timeout, then retries elsewhere.
+    That is the 2 s p95, and a quarter of all requests (1,278) become retries.
+  - Requests that had already connected when the replica froze hang until the
+    client deadline.
+- **Phase 4 ejects the frozen replica within about 2 s**, after two failed
+  health checks:
+  - Requests sent to it in that window wait for the 5 s first-token timeout,
+    then fail over. That window is the 5 s p99.
+  - From then on the run looks as if the replica wasn't there, and it is
+    re-admitted once a health check passes after `SIGCONT`.
+  - The killed replica is ejected after 5 consecutive failed requests.
+- **What still fails** is streams that had already started on a replica when
+  it died. The gateway doesn't retry those, because the client has seen part
+  of a completion.
+- **Least-loaded with no protection** already survives a frozen replica
+  fairly well. The replica's in-flight count climbs, so power-of-two-choices
+  routes around it. Even so, without health checks:
+  - the requests it does send there wait until the replica resumes or the
+    deadline passes;
+  - nothing takes the replica out of rotation.
+
+Per-second timelines and raw data are in
+[`phase4_chaos.md`](bench/results/phase4_chaos.md). Reproduce with
+`bench/phase4_chaos.sh`.
+
 ### Prefix-aware routing (Phase 3)
 
 The workload is 24 tenants, each with its own ~85-token system prompt plus a
@@ -91,6 +135,56 @@ Reproduce the fake run with `bench/phase2_uneven.sh`.
 
 ## Status
 
+**Phase 4 (done): fault tolerance**
+
+- **Active health checks.** `GET /health` runs every second with a 1 s
+  timeout, and two failures in a row eject the replica.
+- **Passive outlier detection.** Five failed requests in a row eject the
+  replica:
+  - These count as failures: unreachable, 5xx, a broken stream, or a
+    first-token timeout.
+  - A 503 is backpressure rather than a fault, and a 4xx is the client's own
+    error, so neither counts.
+  - Passive detection ejects at most half the pool, so a fleet-wide problem
+    (a bad prompt, a client bug) can't drain every replica. Health-check
+    ejections aren't capped.
+- **Ejection backoff.**
+  - An ejection lasts 2 s, doubling each time the same replica is ejected
+    again, up to 60 s.
+  - The replica comes back only once a health check passes.
+  - A replica that stays in service for 60 s starts over at 2 s.
+  - If every replica is ejected, the gateway uses them all anyway. A replica
+    that may have recovered beats failing the request outright.
+- **First-token timeout (5 s).**
+  - An attempt that produces no text in that time is abandoned, and the
+    request fails over to another replica. This catches replicas that accept
+    connections and then stall, which connection errors never reveal.
+  - Only the first token is timed, so a long generation isn't cut off.
+- **Retry budget.**
+  - Over the last 10 s, retries may be at most 10% of requests, plus 10 per
+    second.
+  - Without a budget, a fleet of n failing replicas turns each request into
+    n attempts, and the retries add load to a fleet that is already failing.
+- **Admission control.**
+  - `-max-inflight` (default 1024) caps the streams the gateway serves at
+    once. Beyond it, requests are shed with `RESOURCE_EXHAUSTED` rather than
+    queued.
+  - A new `priority` field on `GenerateRequest` decides who is shed first:
+    low priority is admitted below 70% of the cap, normal below 90%, and high
+    up to the cap.
+- **Chaos tests.**
+  - `go test ./internal/server -run Chaos` freezes one in-process replica and
+    kills another under load. It asserts at least 99% success; the result is
+    typically 99.9%.
+  - `fakebackend -stall` and `bench/phase4_chaos.sh` (real processes,
+    `SIGSTOP`/`SIGKILL`) do the same out of process.
+- **Not built:**
+  - Resuming a stream that fails mid-generation on another replica. This
+    needs the engine to continue from given tokens with the same random
+    state.
+  - Request hedging.
+  - Latency-based outlier ejection.
+
 **Phase 3 (done): prefix cache in the engine, prefix-aware routing**
 
 - TinyServe ([`streaming` branch](https://github.com/muralidhardon/tinyserve))
@@ -160,11 +254,9 @@ Reproduce the fake run with `bench/phase2_uneven.sh`.
 
 **Requires** TinyServe's `POST /generate/stream` endpoint (server-sent events).
 
-**Next**: health checks, outlier ejection and circuit breaking (Phase 4), then
-Kubernetes (Phase 5).
-Until then a dead replica costs one failed connection attempt per second with
-the load-aware routers, and one per request routed to it first with
-`round_robin` and `random`.
+**Next**: Kubernetes (Phase 5): a Helm chart, replica discovery from
+EndpointSlices, drain on scale-down, and autoscaling. Then observability
+(Phase 6).
 
 ## Run it
 
@@ -207,6 +299,14 @@ Server reflection is on, so `grpcurl -plaintext localhost:9000 list` works.
 | `-prefix-index-blocks` | `65536` | `prefix_aware`: prefix blocks remembered |
 | `-scrape-interval` | `250ms` | How often to read each replica's `/metrics` |
 | `-max-attempts` | `0` (all) | Replicas one request may try before its first token |
+| `-health-interval`, `-health-timeout` | `1s`, `1s` | Active `/health` checks (`0` = off) |
+| `-unhealthy-threshold` | `2` | Failed checks in a row that eject a replica |
+| `-outlier-failures` | `5` | Failed requests in a row that eject a replica (`0` = off) |
+| `-max-ejected` | `0.5` | Largest share of the pool that failed requests may eject |
+| `-ejection-base`, `-ejection-max` | `2s`, `60s` | Ejection length, doubling with each repeat ejection |
+| `-first-token-timeout` | `5s` | Abandon an attempt with no text and fail over (`0` = off) |
+| `-retry-budget`, `-retry-min-per-sec` | `0.1`, `10` | Retries allowed per request, plus per second (negative = unlimited) |
+| `-max-inflight` | `1024` | Streams served at once before shedding, lowest priority first (`0` = no limit) |
 | `-drain-timeout` | `30s` | How long SIGTERM waits for open streams |
 | `-v` | off | Debug logging |
 
@@ -228,8 +328,9 @@ cmd/fakebackend/      fault-injecting TinyServe stand-in
 cmd/tsctl/            CLI client
 cmd/loadgen/          load generator
 bench/                benchmark scripts and raw results
-internal/backend/     TinyServe SSE client, /metrics scraping, load and overload state
+internal/backend/     TinyServe SSE client, /metrics scraping, health check, load and overload state
+internal/health/      active health checks, outlier ejection with backoff
 internal/router/      round-robin, random, least-loaded (P2C), consistent hash, prefix-aware
-internal/server/      gRPC service: routing, failover, error mapping
+internal/server/      gRPC service: admission, routing, failover, retry budget, error mapping
 internal/fakebackend/ fake replica, shared by tests and cmd/fakebackend
 ```

@@ -24,6 +24,7 @@ func main() {
 	flag.Float64Var(&cfg.FailRate, "fail-rate", 0, "probability of answering 500")
 	flag.Float64Var(&cfg.OverloadRate, "overload-rate", 0, "probability of answering 503")
 	flag.IntVar(&cfg.DropAfter, "drop-after", 0, "cut the connection after this many tokens (0 = never)")
+	flag.BoolVar(&cfg.Stall, "stall", false, "accept requests and never answer (SIGSTOP does the same to a running replica)")
 	flag.Parse()
 
 	slog.Info("fake TinyServe listening", "addr", *listen)

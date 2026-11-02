@@ -21,6 +21,59 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type Priority int32
+
+const (
+	// Treated as PRIORITY_NORMAL.
+	Priority_PRIORITY_UNSPECIFIED Priority = 0
+	Priority_PRIORITY_LOW         Priority = 1
+	Priority_PRIORITY_NORMAL      Priority = 2
+	Priority_PRIORITY_HIGH        Priority = 3
+)
+
+// Enum value maps for Priority.
+var (
+	Priority_name = map[int32]string{
+		0: "PRIORITY_UNSPECIFIED",
+		1: "PRIORITY_LOW",
+		2: "PRIORITY_NORMAL",
+		3: "PRIORITY_HIGH",
+	}
+	Priority_value = map[string]int32{
+		"PRIORITY_UNSPECIFIED": 0,
+		"PRIORITY_LOW":         1,
+		"PRIORITY_NORMAL":      2,
+		"PRIORITY_HIGH":        3,
+	}
+)
+
+func (x Priority) Enum() *Priority {
+	p := new(Priority)
+	*p = x
+	return p
+}
+
+func (x Priority) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (Priority) Descriptor() protoreflect.EnumDescriptor {
+	return file_inference_v1_inference_proto_enumTypes[0].Descriptor()
+}
+
+func (Priority) Type() protoreflect.EnumType {
+	return &file_inference_v1_inference_proto_enumTypes[0]
+}
+
+func (x Priority) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use Priority.Descriptor instead.
+func (Priority) EnumDescriptor() ([]byte, []int) {
+	return file_inference_v1_inference_proto_rawDescGZIP(), []int{0}
+}
+
 type GenerateRequest struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Prompt string                 `protobuf:"bytes,1,opt,name=prompt,proto3" json:"prompt,omitempty"`
@@ -31,7 +84,9 @@ type GenerateRequest struct {
 	TopK        *uint32  `protobuf:"varint,4,opt,name=top_k,json=topK,proto3,oneof" json:"top_k,omitempty"`
 	Seed        *uint32  `protobuf:"varint,5,opt,name=seed,proto3,oneof" json:"seed,omitempty"`
 	// Used for per-tenant limits and metrics; may be empty.
-	TenantId      string `protobuf:"bytes,6,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	TenantId string `protobuf:"bytes,6,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
+	// Under load the gateway sheds low-priority requests first.
+	Priority      Priority `protobuf:"varint,7,opt,name=priority,proto3,enum=tinyserve.inference.v1.Priority" json:"priority,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -106,6 +161,13 @@ func (x *GenerateRequest) GetTenantId() string {
 		return x.TenantId
 	}
 	return ""
+}
+
+func (x *GenerateRequest) GetPriority() Priority {
+	if x != nil {
+		return x.Priority
+	}
+	return Priority_PRIORITY_UNSPECIFIED
 }
 
 type GenerateChunk struct {
@@ -285,7 +347,7 @@ var File_inference_v1_inference_proto protoreflect.FileDescriptor
 
 const file_inference_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1cinference/v1/inference.proto\x12\x16tinyserve.inference.v1\"\xe2\x01\n" +
+	"\x1cinference/v1/inference.proto\x12\x16tinyserve.inference.v1\"\xa0\x02\n" +
 	"\x0fGenerateRequest\x12\x16\n" +
 	"\x06prompt\x18\x01 \x01(\tR\x06prompt\x12\x1d\n" +
 	"\n" +
@@ -293,7 +355,8 @@ const file_inference_v1_inference_proto_rawDesc = "" +
 	"\vtemperature\x18\x03 \x01(\x02H\x00R\vtemperature\x88\x01\x01\x12\x18\n" +
 	"\x05top_k\x18\x04 \x01(\rH\x01R\x04topK\x88\x01\x01\x12\x17\n" +
 	"\x04seed\x18\x05 \x01(\rH\x02R\x04seed\x88\x01\x01\x12\x1b\n" +
-	"\ttenant_id\x18\x06 \x01(\tR\btenantIdB\x0e\n" +
+	"\ttenant_id\x18\x06 \x01(\tR\btenantId\x12<\n" +
+	"\bpriority\x18\a \x01(\x0e2 .tinyserve.inference.v1.PriorityR\bpriorityB\x0e\n" +
 	"\f_temperatureB\b\n" +
 	"\x06_top_kB\a\n" +
 	"\x05_seed\"X\n" +
@@ -311,7 +374,12 @@ const file_inference_v1_inference_proto_rawDesc = "" +
 	"\x0fbackend_ttft_ms\x18\b \x01(\x01R\rbackendTtftMs\x12&\n" +
 	"\x0fgateway_ttft_ms\x18\t \x01(\x01R\rgatewayTtftMs\x12?\n" +
 	"\x1cbackend_prefix_tokens_reused\x18\n" +
-	" \x01(\rR\x19backendPrefixTokensReused2i\n" +
+	" \x01(\rR\x19backendPrefixTokensReused*^\n" +
+	"\bPriority\x12\x18\n" +
+	"\x14PRIORITY_UNSPECIFIED\x10\x00\x12\x10\n" +
+	"\fPRIORITY_LOW\x10\x01\x12\x13\n" +
+	"\x0fPRIORITY_NORMAL\x10\x02\x12\x11\n" +
+	"\rPRIORITY_HIGH\x10\x032i\n" +
 	"\tInference\x12\\\n" +
 	"\bGenerate\x12'.tinyserve.inference.v1.GenerateRequest\x1a%.tinyserve.inference.v1.GenerateChunk0\x01BIZGgithub.com/muralidhardon/tinyserve-gateway/gen/inference/v1;inferencev1b\x06proto3"
 
@@ -327,21 +395,24 @@ func file_inference_v1_inference_proto_rawDescGZIP() []byte {
 	return file_inference_v1_inference_proto_rawDescData
 }
 
+var file_inference_v1_inference_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_inference_v1_inference_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_inference_v1_inference_proto_goTypes = []any{
-	(*GenerateRequest)(nil), // 0: tinyserve.inference.v1.GenerateRequest
-	(*GenerateChunk)(nil),   // 1: tinyserve.inference.v1.GenerateChunk
-	(*Usage)(nil),           // 2: tinyserve.inference.v1.Usage
+	(Priority)(0),           // 0: tinyserve.inference.v1.Priority
+	(*GenerateRequest)(nil), // 1: tinyserve.inference.v1.GenerateRequest
+	(*GenerateChunk)(nil),   // 2: tinyserve.inference.v1.GenerateChunk
+	(*Usage)(nil),           // 3: tinyserve.inference.v1.Usage
 }
 var file_inference_v1_inference_proto_depIdxs = []int32{
-	2, // 0: tinyserve.inference.v1.GenerateChunk.usage:type_name -> tinyserve.inference.v1.Usage
-	0, // 1: tinyserve.inference.v1.Inference.Generate:input_type -> tinyserve.inference.v1.GenerateRequest
-	1, // 2: tinyserve.inference.v1.Inference.Generate:output_type -> tinyserve.inference.v1.GenerateChunk
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	0, // 0: tinyserve.inference.v1.GenerateRequest.priority:type_name -> tinyserve.inference.v1.Priority
+	3, // 1: tinyserve.inference.v1.GenerateChunk.usage:type_name -> tinyserve.inference.v1.Usage
+	1, // 2: tinyserve.inference.v1.Inference.Generate:input_type -> tinyserve.inference.v1.GenerateRequest
+	2, // 3: tinyserve.inference.v1.Inference.Generate:output_type -> tinyserve.inference.v1.GenerateChunk
+	3, // [3:4] is the sub-list for method output_type
+	2, // [2:3] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_inference_v1_inference_proto_init() }
@@ -355,13 +426,14 @@ func file_inference_v1_inference_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_inference_v1_inference_proto_rawDesc), len(file_inference_v1_inference_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_inference_v1_inference_proto_goTypes,
 		DependencyIndexes: file_inference_v1_inference_proto_depIdxs,
+		EnumInfos:         file_inference_v1_inference_proto_enumTypes,
 		MessageInfos:      file_inference_v1_inference_proto_msgTypes,
 	}.Build()
 	File_inference_v1_inference_proto = out.File

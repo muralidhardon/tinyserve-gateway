@@ -16,12 +16,13 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
+	grpchealth "google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
 	pb "github.com/muralidhardon/tinyserve-gateway/gen/inference/v1"
 	"github.com/muralidhardon/tinyserve-gateway/internal/backend"
+	"github.com/muralidhardon/tinyserve-gateway/internal/health"
 	"github.com/muralidhardon/tinyserve-gateway/internal/router"
 	"github.com/muralidhardon/tinyserve-gateway/internal/server"
 )
@@ -37,6 +38,18 @@ func main() {
 	flag.IntVar(&prefix.Slack, "prefix-slack", 4, "prefix_aware: extra sequences above that share a replica may carry (-1 = none)")
 	flag.IntVar(&prefix.IndexBlocks, "prefix-index-blocks", 1<<16, "prefix_aware: prefix blocks remembered")
 	maxAttempts := flag.Int("max-attempts", 0, "replicas one request may try before its first token (0 = all)")
+	var hc health.Config
+	flag.DurationVar(&hc.Interval, "health-interval", time.Second, "active /health check interval (0 = off)")
+	flag.DurationVar(&hc.Timeout, "health-timeout", time.Second, "per health check")
+	flag.IntVar(&hc.UnhealthyThreshold, "unhealthy-threshold", 2, "consecutive failed health checks that eject a replica")
+	flag.IntVar(&hc.ConsecutiveFailures, "outlier-failures", 5, "consecutive failed requests that eject a replica (0 = off)")
+	flag.Float64Var(&hc.MaxEjectedFraction, "max-ejected", 0.5, "most of the pool that failed requests may eject")
+	flag.DurationVar(&hc.BaseEjection, "ejection-base", 2*time.Second, "first ejection; doubles with each further one")
+	flag.DurationVar(&hc.MaxEjection, "ejection-max", 60*time.Second, "longest ejection")
+	firstTokenTimeout := flag.Duration("first-token-timeout", 5*time.Second, "abandon an attempt with no text after this and try another replica (0 = off)")
+	retryRatio := flag.Float64("retry-budget", 0.1, "retries allowed as a fraction of requests (negative = unlimited)")
+	retryMin := flag.Float64("retry-min-per-sec", 10, "retries per second allowed regardless of -retry-budget")
+	maxInflight := flag.Int("max-inflight", 1024, "streams served at once before shedding, lowest priority first (0 = no limit)")
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "how long shutdown waits for open streams")
 	verbose := flag.Bool("v", false, "debug logging")
 	flag.Parse()
@@ -74,16 +87,25 @@ func main() {
 		log.Error("listen", "err", err)
 		os.Exit(1)
 	}
+	hc.Logger = log
+	monitor := health.New(hc, pool)
+	var budget *server.RetryBudget
+	if *retryRatio >= 0 {
+		budget = server.NewRetryBudget(*retryRatio, *retryMin)
+	}
 	grpcServer := grpc.NewServer()
 	pb.RegisterInferenceServer(grpcServer, server.New(server.Config{
-		Backends: pool, Router: rt, MaxAttempts: *maxAttempts, Logger: log,
+		Backends: pool, Router: rt, MaxAttempts: *maxAttempts,
+		Health: monitor, RetryBudget: budget, FirstTokenTimeout: *firstTokenTimeout, MaxInflight: *maxInflight,
+		Logger: log,
 	}))
-	healthSrv := health.NewServer()
+	healthSrv := grpchealth.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthSrv)
 	reflection.Register(grpcServer)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go monitor.Run(ctx)
 	go backend.ScrapeLoop(ctx, pool, *scrapeInterval, func(b *backend.Backend, err error) {
 		log.Debug("scrape failed", "backend", b.Name, "err", err)
 	})

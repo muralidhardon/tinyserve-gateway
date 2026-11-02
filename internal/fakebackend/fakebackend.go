@@ -6,6 +6,7 @@ package fakebackend
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"sync"
@@ -29,6 +30,10 @@ type Config struct {
 	FailRate     float64 // answer 500 before streaming
 	OverloadRate float64 // answer 503 before streaming
 	DropAfter    int     // if > 0, cut the connection after this many tokens
+	// Stall makes every endpoint, /health included, accept the request and
+	// never answer: a hung process, as seen by a client. It applies to
+	// requests that arrive while it is set.
+	Stall bool
 }
 
 type Server struct {
@@ -83,7 +88,17 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		fmt.Fprintf(w, "tinyserve_queue_depth %d\ntinyserve_active_sequences %d\n", s.queued.Load(), s.active.Load())
 	})
-	return mux
+	// While Stall is set, requests hang until the client gives up.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.config().Stall {
+			// Read the body first: only then does the server watch the
+			// connection and cancel the context when the client hangs up.
+			io.Copy(io.Discard, r.Body)
+			<-r.Context().Done()
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // Token returns the fake completion's i-th token, so tests can predict output.

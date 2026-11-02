@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +47,12 @@ func startGateway(t *testing.T, rs []replica) pb.InferenceClient {
 }
 
 func startGatewayWith(t *testing.T, rs []replica, routerName string) pb.InferenceClient {
+	return startGatewayConfig(t, rs, routerName, nil)
+}
+
+// startGatewayConfig is startGatewayWith, with configure (if non-nil) adjusting
+// the server's Config before it starts.
+func startGatewayConfig(t *testing.T, rs []replica, routerName string, configure func(*Config)) pb.InferenceClient {
 	t.Helper()
 	var pool []*backend.Backend
 	for _, r := range rs {
@@ -54,9 +62,13 @@ func startGatewayWith(t *testing.T, rs []replica, routerName string) pb.Inferenc
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg := Config{Backends: pool, Router: rt, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if configure != nil {
+		configure(&cfg)
+	}
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	pb.RegisterInferenceServer(srv, New(Config{Backends: pool, Router: rt}))
+	pb.RegisterInferenceServer(srv, New(cfg))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 
@@ -211,11 +223,10 @@ func TestOverloadedReplicaIsAvoidedAfterIts503(t *testing.T) {
 	}
 }
 
-var promptSeq int
+var promptSeq atomic.Int64
 
 func distinctPrompt() string {
-	promptSeq++
-	return fmt.Sprintf("prompt %d", promptSeq)
+	return fmt.Sprintf("prompt %d", promptSeq.Add(1))
 }
 
 func TestDeadReplicaDoesNotAttractLeastLoadedTraffic(t *testing.T) {

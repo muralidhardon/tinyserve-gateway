@@ -21,6 +21,16 @@ message GenerateRequest {
   optional uint32 seed = 5;
   // Used for per-tenant limits and metrics; may be empty.
   string tenant_id = 6;
+  // Under load the gateway sheds low-priority requests first.
+  Priority priority = 7;
+}
+
+enum Priority {
+  // Treated as PRIORITY_NORMAL.
+  PRIORITY_UNSPECIFIED = 0;
+  PRIORITY_LOW = 1;
+  PRIORITY_NORMAL = 2;
+  PRIORITY_HIGH = 3;
 }
 
 message GenerateChunk {

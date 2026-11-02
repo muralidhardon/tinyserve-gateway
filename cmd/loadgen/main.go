@@ -58,6 +58,7 @@ func main() {
 	timeout := flag.Duration("timeout", 30*time.Second, "per-request deadline")
 	label := flag.String("label", "", "name for this run in the summary")
 	out := flag.String("out", "", "write per-request results as JSON to this file")
+	timeline := flag.Duration("timeline", 0, "also print results per interval of send time, e.g. 1s")
 	flag.Parse()
 
 	conn, err := grpc.NewClient(*addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -115,6 +116,9 @@ func main() {
 	elapsed := time.Since(begin)
 
 	summarize(*label, results, elapsed)
+	if *timeline > 0 {
+		printTimeline(results, *timeline)
+	}
 	if *out != "" {
 		b, _ := json.MarshalIndent(results, "", " ")
 		if err := os.WriteFile(*out, b, 0o644); err != nil {
@@ -241,6 +245,36 @@ func summarize(label string, rs []result, elapsed time.Duration) {
 		parts = append(parts, fmt.Sprintf("%s %.0f%%", b, 100*float64(backends[b])/float64(ok)))
 	}
 	fmt.Printf("served   %s\n", strings.Join(parts, "  "))
+}
+
+// printTimeline buckets requests by when they were sent, so the effect of a
+// fault injected mid-run shows up at the time it happened.
+func printTimeline(rs []result, every time.Duration) {
+	type slot struct {
+		ok, failed, retried int
+		lat                 []time.Duration
+	}
+	var slots []slot
+	for _, r := range rs {
+		i := int(r.Start / every)
+		for len(slots) <= i {
+			slots = append(slots, slot{})
+		}
+		s := &slots[i]
+		if r.ErrorCode != "" {
+			s.failed++
+			continue
+		}
+		s.ok++
+		s.lat = append(s.lat, r.Latency)
+		if r.Attempts > 1 {
+			s.retried++
+		}
+	}
+	fmt.Printf("%8s %6s %6s %7s %10s\n", "sent at", "ok", "failed", "retried", "p99 lat")
+	for i, s := range slots {
+		fmt.Printf("%7.0fs %6d %6d %7d %8.0fms\n", (time.Duration(i) * every).Seconds(), s.ok, s.failed, s.retried, ms(pct(s.lat, 99)))
+	}
 }
 
 func pct(ds []time.Duration, p float64) time.Duration {
