@@ -19,7 +19,7 @@ message GenerateRequest {
   optional float temperature = 3;
   optional uint32 top_k = 4;
   optional uint32 seed = 5;
-  // Used for per-tenant limits and metrics; may be empty.
+  // Accepted but not used yet: reserved for per-tenant quotas. May be empty.
   string tenant_id = 6;
   // Under load the gateway sheds low-priority requests first.
   Priority priority = 7;

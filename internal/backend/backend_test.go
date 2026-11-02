@@ -53,6 +53,28 @@ func TestStreamDecodesEvents(t *testing.T) {
 	}
 }
 
+// The SSE format allows more than TinyServe sends: no space after the colon,
+// comment lines, and data split over several lines.
+func TestStreamAcceptsSSEVariants(t *testing.T) {
+	b := serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		sse(w,
+			": keep-alive comment\n\n",
+			"event:token\ndata:{\"text\": \"a\"}\n\n",
+			"event: done\ndata: {\"text\": \"a\",\ndata:  \"tokens_generated\": 1}\n\n")
+	})
+	var got []string
+	res, err := b.Stream(context.Background(), Request{Prompt: "x"}, func(s string) error {
+		got = append(got, s)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "a" || res.TokensGenerated != 1 {
+		t.Errorf("tokens = %q, result = %+v", got, res)
+	}
+}
+
 func TestStreamErrors(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -60,9 +82,9 @@ func TestStreamErrors(t *testing.T) {
 		kind      Kind
 		retryable bool
 	}{
-		{"503", func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "full", 503) }, Overloaded, true},
-		{"422", func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "bad", 422) }, Rejected, false},
-		{"500", func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "boom", 500) }, Failed, true},
+		{"503", func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "full", http.StatusServiceUnavailable) }, Overloaded, true},
+		{"422", func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "bad", http.StatusUnprocessableEntity) }, Rejected, false},
+		{"500", func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "boom", http.StatusInternalServerError) }, Failed, true},
 		{"error event", func(w http.ResponseWriter, _ *http.Request) {
 			sse(w, "event: error\ndata: {\"detail\": \"engine crashed\"}\n\n")
 		}, Failed, true},
@@ -111,7 +133,7 @@ func TestCanceledContextIsNotABackendError(t *testing.T) {
 func TestOverloadedMarksBackend(t *testing.T) {
 	b := serve(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Retry-After", "2")
-		http.Error(w, "full", 503)
+		http.Error(w, "full", http.StatusServiceUnavailable)
 	})
 	if b.Avoided() {
 		t.Fatal("overloaded before any request")

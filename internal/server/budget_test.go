@@ -30,8 +30,14 @@ func TestRetryBudget(t *testing.T) {
 	for range 20 {
 		b.Request()
 	}
-	if !b.TryRetry() || !b.TryRetry() || b.TryRetry() {
-		t.Fatal("want exactly 2 retries for 20 fresh requests")
+	allowed := 0
+	for range 3 {
+		if b.TryRetry() {
+			allowed++
+		}
+	}
+	if allowed != 2 {
+		t.Fatalf("%d retries allowed for 20 fresh requests, want 2", allowed)
 	}
 }
 

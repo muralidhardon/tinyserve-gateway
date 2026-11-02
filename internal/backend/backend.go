@@ -281,7 +281,10 @@ func (b *Backend) Stream(ctx context.Context, req Request, onToken func(string) 
 	return result, err
 }
 
-// readEvents decodes the SSE stream until `done`, `error`, or EOF.
+// readEvents decodes the SSE stream until `done`, `error`, or EOF. It follows
+// the SSE format, not just what TinyServe happens to send: the space after the
+// colon is optional, lines starting with a colon are comments, and an event's
+// data may span several `data` lines, joined with newlines.
 func (b *Backend) readEvents(r io.Reader, onToken func(string) error) (*Result, error) {
 	fail := func(format string, args ...any) error {
 		return &Error{Kind: Failed, Backend: b.Name, Status: http.StatusOK, Msg: fmt.Sprintf(format, args...)}
@@ -290,15 +293,21 @@ func (b *Backend) readEvents(r io.Reader, onToken func(string) error) (*Result, 
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024) // the done event repeats the whole completion
 	var event, data string
+	var hasData bool
 	for sc.Scan() {
 		line := sc.Text()
 		if line != "" {
-			field, value, _ := strings.Cut(line, ": ")
+			field, value, _ := strings.Cut(line, ":")
+			value = strings.TrimPrefix(value, " ")
 			switch field {
 			case "event":
 				event = value
 			case "data":
-				data = value
+				if hasData {
+					data += "\n"
+				}
+				data += value
+				hasData = true
 			}
 			continue
 		}
@@ -327,7 +336,7 @@ func (b *Backend) readEvents(r io.Reader, onToken func(string) error) (*Result, 
 			_ = json.Unmarshal([]byte(data), &e)
 			return nil, fail("generation failed: %s", e.Detail)
 		}
-		event, data = "", ""
+		event, data, hasData = "", "", false
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fail("stream broken: %v", err)

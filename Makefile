@@ -1,7 +1,8 @@
 GO ?= go
 BIN := bin
+STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.8.2
 
-.PHONY: all build proto test race lint run fake clean
+.PHONY: all build proto test race lint image kind kind-observability kind-down run fake clean
 
 all: build
 
@@ -20,8 +21,27 @@ test:
 race:
 	$(GO) test -race ./...
 
+# What CI checks, besides the tests.
 lint:
 	$(GO) vet ./...
+	@test -z "$$(gofmt -l cmd internal)" || { gofmt -l cmd internal; exit 1; }
+	$(GO) mod tidy -diff
+	$(GO) run $(STATICCHECK) ./...
+	helm lint deploy/helm/tinyserve-gateway
+
+image:
+	docker build -t tinyserve-gateway:dev .
+
+# A local 3-node cluster with TinyServe behind the gateway (see deploy/kind/up.sh).
+kind:
+	deploy/kind/up.sh
+
+# The same, plus Prometheus, Jaeger and Grafana, with every request traced.
+kind-observability:
+	OBSERVABILITY=1 deploy/kind/up.sh
+
+kind-down:
+	kind delete cluster --name tinyserve
 
 # Two fake replicas and a gateway in front of them; Ctrl-C stops all three.
 fake: build

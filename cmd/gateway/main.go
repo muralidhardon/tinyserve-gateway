@@ -144,7 +144,6 @@ func main() {
 		met = metrics.New(metrics.Replicas{Pool: replicas, Ejected: monitor.Ejected},
 			func() float64 { return float64(srv.Inflight()) })
 		met.InitRoutes(router.Reasons(*routerName)...)
-		go serveMetrics(*metricsListen, met, log)
 	}
 	var budget *server.RetryBudget
 	if *retryRatio >= 0 {
@@ -157,6 +156,10 @@ func main() {
 		Metrics: met, Logger: log,
 	})
 	pb.RegisterInferenceServer(grpcServer, srv)
+	if met != nil {
+		// Only now: the inflight gauge reads srv, and a scrape can arrive at once.
+		go serveMetrics(*metricsListen, met, log)
+	}
 	healthSrv := grpchealth.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthSrv)
 	// Not ready while there is nothing to route to, so a rollout waits for

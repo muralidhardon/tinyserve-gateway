@@ -1,5 +1,7 @@
 # TinyServe Gateway
 
+[![ci](https://github.com/muralidhardon/tinyserve-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/muralidhardon/tinyserve-gateway/actions/workflows/ci.yml)
+
 A Go gateway that serves a fleet of [TinyServe](https://github.com/muralidhardon/tinyserve)
 replicas over gRPC. TinyServe is my LLM inference engine: a hand-written C
 transformer with a KV cache, continuous batching and int8 quantization, behind a
@@ -250,7 +252,7 @@ run, the median of 3 rounds.
     own timings;
   - a Grafana dashboard that puts gateway and engine metrics side by side.
 
-About 2,300 lines of Go, plus 70 tests. The tests include in-process gRPC
+About 2,300 lines of Go, plus 71 tests. The tests include in-process gRPC
 over bufconn, a chaos test, and discovery against a fake Kubernetes API.
 
 ## Run it
@@ -352,8 +354,18 @@ bench/phase6_demo.sh                     # 4 min of traffic, one TinyServe crash
 ```bash
 make test    # unit + in-process gRPC tests (bufconn + fake replicas)
 make race    # same, with the race detector
+make lint    # vet, gofmt, go mod tidy, staticcheck, helm lint: what CI checks
 make proto   # regenerate gen/ after editing the .proto (needs protoc, protoc-gen-go, protoc-gen-go-grpc)
+make image   # the Docker image
+make kind    # local cluster (make kind-observability adds Prometheus, Jaeger, Grafana; make kind-down)
 ```
+
+CI runs the race tests, the lint checks, `helm lint` in every autoscaling
+mode, and a Docker build on every push.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ## Layout
 

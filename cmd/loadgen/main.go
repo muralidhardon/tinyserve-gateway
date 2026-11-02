@@ -189,6 +189,10 @@ func prompts(workload string, tenants int, zipf float64, seed uint64) func(int) 
 		system := "The Queen had only one way of settling all difficulties, great or small. "
 		return func(i int) (string, int) { return fmt.Sprintf("%sQuestion %d: Alice was", system, i), 0 }
 	case "tenants":
+		if zipf <= 1 || tenants < 1 {
+			fmt.Fprintln(os.Stderr, "tenants workload: -zipf must be > 1 and -tenants at least 1")
+			os.Exit(2)
+		}
 		// Each tenant has its own ~300-byte system prompt (about 80 tokens), distinct from its
 		// first bytes, followed by a short per-request question.
 		systems := make([]string, tenants)

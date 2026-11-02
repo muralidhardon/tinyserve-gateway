@@ -83,7 +83,7 @@ type GenerateRequest struct {
 	Temperature *float32 `protobuf:"fixed32,3,opt,name=temperature,proto3,oneof" json:"temperature,omitempty"`
 	TopK        *uint32  `protobuf:"varint,4,opt,name=top_k,json=topK,proto3,oneof" json:"top_k,omitempty"`
 	Seed        *uint32  `protobuf:"varint,5,opt,name=seed,proto3,oneof" json:"seed,omitempty"`
-	// Used for per-tenant limits and metrics; may be empty.
+	// Accepted but not used yet: reserved for per-tenant quotas. May be empty.
 	TenantId string `protobuf:"bytes,6,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`
 	// Under load the gateway sheds low-priority requests first.
 	Priority      Priority `protobuf:"varint,7,opt,name=priority,proto3,enum=tinyserve.inference.v1.Priority" json:"priority,omitempty"`

@@ -9,5 +9,5 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/...
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ /usr/local/bin/
-EXPOSE 9000
+EXPOSE 9000 9090
 ENTRYPOINT ["/usr/local/bin/gateway"]

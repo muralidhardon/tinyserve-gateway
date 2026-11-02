@@ -183,7 +183,7 @@ func TestTraceShowsEachAttempt(t *testing.T) {
 	attr := func(s sdktrace.ReadOnlySpan, key string) string {
 		for _, kv := range s.Attributes() {
 			if string(kv.Key) == key {
-				return kv.Value.Emit()
+				return kv.Value.String()
 			}
 		}
 		return ""
