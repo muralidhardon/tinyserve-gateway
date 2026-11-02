@@ -100,6 +100,12 @@ func (p *PrefixAware) Match(prompt string, b *backend.Backend) int {
 }
 
 func (p *PrefixAware) Pick(prompt string, candidates []*backend.Backend) *backend.Backend {
+	b, _ := p.PickExplained(prompt, candidates)
+	return b
+}
+
+// PickExplained is Pick, also reporting why that replica was chosen.
+func (p *PrefixAware) PickExplained(prompt string, candidates []*backend.Backend) (*backend.Backend, Decision) {
 	keys := p.keys(prompt)
 	candidates = notAvoided(candidates)
 
@@ -140,20 +146,30 @@ func (p *PrefixAware) Pick(prompt string, candidates []*backend.Backend) *backen
 	// prefix stays put instead of hopping to whichever replica is momentarily
 	// lighter and ending up cached (and evicting others) everywhere.
 	var best *backend.Backend
+	matched := false
 	for _, b := range candidates {
 		d := depth[b]
-		if d == 0 || b.Load()+1 > limit {
+		if d == 0 {
+			continue
+		}
+		matched = true
+		if b.Load()+1 > limit {
 			continue
 		}
 		if best == nil || d > depth[best] || (d == depth[best] && rank[b] < rank[best]) {
 			best = b
 		}
 	}
+	reason := "prefix_match"
 	if best == nil {
+		reason = "no_match"
+		if matched {
+			reason = "spill"
+		}
 		best = p.fallback.Pick(prompt, candidates)
 	}
 	p.record(keys, best)
-	return best
+	return best, Decision{Reason: reason, MatchBlocks: depth[best]}
 }
 
 // keys returns the chained hash of each whole block of the prompt: key i

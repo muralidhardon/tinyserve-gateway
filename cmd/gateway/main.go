@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	grpchealth "google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -29,6 +31,7 @@ import (
 	"github.com/muralidhardon/tinyserve-gateway/internal/backend"
 	"github.com/muralidhardon/tinyserve-gateway/internal/discovery"
 	"github.com/muralidhardon/tinyserve-gateway/internal/health"
+	"github.com/muralidhardon/tinyserve-gateway/internal/metrics"
 	"github.com/muralidhardon/tinyserve-gateway/internal/pool"
 	"github.com/muralidhardon/tinyserve-gateway/internal/router"
 	"github.com/muralidhardon/tinyserve-gateway/internal/server"
@@ -62,6 +65,9 @@ func main() {
 	retryMin := flag.Float64("retry-min-per-sec", 10, "retries per second allowed regardless of -retry-budget")
 	maxInflight := flag.Int("max-inflight", 1024, "streams served at once before shedding, lowest priority first (0 = no limit)")
 	drainTimeout := flag.Duration("drain-timeout", 30*time.Second, "how long shutdown waits for open streams")
+	metricsListen := flag.String("metrics-listen", ":9090", "HTTP address serving Prometheus /metrics (empty = off)")
+	otlpEndpoint := flag.String("otlp-endpoint", "", "send traces over OTLP/gRPC to this host:port (empty = tracing off)")
+	traceSample := flag.Float64("trace-sample", 0.1, "fraction of requests to trace, unless the caller already decided")
 	verbose := flag.Bool("v", false, "debug logging")
 	flag.Parse()
 
@@ -72,13 +78,33 @@ func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	slog.SetDefault(log)
 
-	httpClient := &http.Client{Transport: &http.Transport{
+	var transport http.RoundTripper = &http.Transport{
 		MaxIdleConnsPerHost: 64,
 		IdleConnTimeout:     90 * time.Second,
 		DialContext:         (&net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-	}}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	var grpcOpts []grpc.ServerOption
+	if *otlpEndpoint != "" {
+		shutdown, err := startTracing(ctx, *otlpEndpoint, *traceSample)
+		if err != nil {
+			log.Error("tracing", "err", err)
+			os.Exit(1)
+		}
+		defer func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdown(sctx); err != nil {
+				log.Warn("flushing traces", "err", err)
+			}
+		}()
+		transport = tracedTransport(transport)
+		grpcOpts = append(grpcOpts, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+		log.Info("tracing", "otlp_endpoint", *otlpEndpoint, "sample", *traceSample)
+	}
+	httpClient := &http.Client{Transport: transport}
 
 	replicas := pool.New(httpClient, log)
 	if dc.Service != "" {
@@ -107,18 +133,30 @@ func main() {
 		log.Error("listen", "err", err)
 		os.Exit(1)
 	}
+	var (
+		met *metrics.Metrics
+		srv *server.Server
+	)
 	hc.Logger = log
+	hc.OnEject = func(_ *backend.Backend, passive bool) { met.Ejection(passive) }
 	monitor := health.New(hc, replicas)
+	if *metricsListen != "" {
+		met = metrics.New(metrics.Replicas{Pool: replicas, Ejected: monitor.Ejected},
+			func() float64 { return float64(srv.Inflight()) })
+		met.InitRoutes(router.Reasons(*routerName)...)
+		go serveMetrics(*metricsListen, met, log)
+	}
 	var budget *server.RetryBudget
 	if *retryRatio >= 0 {
 		budget = server.NewRetryBudget(*retryRatio, *retryMin)
 	}
-	grpcServer := grpc.NewServer()
-	pb.RegisterInferenceServer(grpcServer, server.New(server.Config{
+	grpcServer := grpc.NewServer(grpcOpts...)
+	srv = server.New(server.Config{
 		Backends: replicas, Router: rt, MaxAttempts: *maxAttempts,
 		Health: monitor, RetryBudget: budget, FirstTokenTimeout: *firstTokenTimeout, MaxInflight: *maxInflight,
-		Logger: log,
-	}))
+		Metrics: met, Logger: log,
+	})
+	pb.RegisterInferenceServer(grpcServer, srv)
 	healthSrv := grpchealth.NewServer()
 	healthpb.RegisterHealthServer(grpcServer, healthSrv)
 	// Not ready while there is nothing to route to, so a rollout waits for
@@ -158,6 +196,18 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("stopped")
+}
+
+// serveMetrics serves /metrics until the process exits. It keeps answering
+// during the drain, so the last scrapes see the streams finishing.
+func serveMetrics(addr string, m *metrics.Metrics, log *slog.Logger) {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(m.Registry, promhttp.HandlerOpts{}))
+	s := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	log.Info("metrics listening", "addr", addr)
+	if err := s.ListenAndServe(); err != nil {
+		log.Error("metrics", "err", err)
+	}
 }
 
 // startDiscovery fills replicas from a Kubernetes Service, using the pod's

@@ -1,0 +1,104 @@
+# Jaeger (traces over OTLP) and Grafana (Prometheus + Jaeger data sources,
+# the gateway dashboard), for the local kind cluster only: in-memory storage,
+# anonymous Grafana access. Prometheus comes from its Helm chart (up.sh).
+# The dashboard ConfigMap is created by up.sh from deploy/grafana/.
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: monitoring
+spec:
+  selector: {app: jaeger}
+  ports:
+    - {name: otlp-grpc, port: 4317}
+    - {name: ui, port: 16686}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels: {app: jaeger}
+  template:
+    metadata:
+      labels: {app: jaeger}
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/jaeger:2.9.0
+          ports:
+            - {containerPort: 4317}
+            - {containerPort: 16686}
+          resources:
+            limits: {memory: 512Mi}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning
+  namespace: monitoring
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        uid: prometheus
+        type: prometheus
+        url: http://prometheus-server.monitoring.svc
+        isDefault: true
+      - name: Jaeger
+        uid: jaeger
+        type: jaeger
+        url: http://jaeger.monitoring.svc:16686
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: tinyserve
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  selector: {app: grafana}
+  ports:
+    - {name: http, port: 3000}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels: {app: grafana}
+  template:
+    metadata:
+      labels: {app: grafana}
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:12.1.1
+          env:
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"}
+            - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: Viewer}
+            - {name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH, value: /var/lib/grafana/dashboards/tinyserve-gateway.json}
+          ports:
+            - {containerPort: 3000}
+          readinessProbe:
+            httpGet: {path: /api/health, port: 3000}
+          volumeMounts:
+            - {name: provisioning, mountPath: /etc/grafana/provisioning/datasources/datasources.yaml, subPath: datasources.yaml}
+            - {name: provisioning, mountPath: /etc/grafana/provisioning/dashboards/dashboards.yaml, subPath: dashboards.yaml}
+            - {name: dashboards, mountPath: /var/lib/grafana/dashboards}
+      volumes:
+        - name: provisioning
+          configMap: {name: grafana-provisioning}
+        - name: dashboards
+          configMap: {name: grafana-dashboards}

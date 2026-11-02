@@ -19,6 +19,44 @@ type Router interface {
 	Pick(prompt string, candidates []*backend.Backend) *backend.Backend
 }
 
+// Decision says why a router picked the replica it did.
+type Decision struct {
+	// Reason is prefix_match, spill (the replicas holding the prefix were over
+	// their load bound) or no_match for prefix_aware; other routers report
+	// their own name.
+	Reason string
+	// MatchBlocks is how many prompt blocks the pick was predicted to have
+	// cached, or -1 for routers that don't track prefixes.
+	MatchBlocks int
+}
+
+// Explain picks like r.Pick and also says why.
+func Explain(r Router, prompt string, candidates []*backend.Backend) (*backend.Backend, Decision) {
+	if p, ok := r.(*PrefixAware); ok {
+		return p.PickExplained(prompt, candidates)
+	}
+	name := "unknown"
+	switch r.(type) {
+	case *RoundRobin:
+		name = "round_robin"
+	case Random:
+		name = "random"
+	case LeastLoaded:
+		name = "least_loaded"
+	case *ConsistentHash:
+		name = "consistent_hash"
+	}
+	return r.Pick(prompt, candidates), Decision{Reason: name, MatchBlocks: -1}
+}
+
+// Reasons lists the Decision reasons the named strategy reports.
+func Reasons(name string) []string {
+	if name == "prefix_aware" {
+		return []string{"prefix_match", "spill", "no_match"}
+	}
+	return []string{name}
+}
+
 // Names lists the strategies New accepts.
 var Names = []string{"round_robin", "random", "least_loaded", "consistent_hash", "prefix_aware"}
 

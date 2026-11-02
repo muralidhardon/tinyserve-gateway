@@ -41,6 +41,10 @@ type Config struct {
 	BaseEjection time.Duration
 	MaxEjection  time.Duration
 
+	// OnEject, if set, is called (with the monitor's lock held) for each
+	// ejection; passive is true when failed requests caused it.
+	OnEject func(b *backend.Backend, passive bool)
+
 	Logger *slog.Logger
 }
 
@@ -154,7 +158,7 @@ func (m *Monitor) checkAll(ctx context.Context) {
 		}
 		s.failedChecks++
 		if !s.ejected && s.failedChecks >= m.cfg.UnhealthyThreshold {
-			m.eject(b, s, now, "health check failed", errs[i])
+			m.eject(b, s, now, false, errs[i])
 		}
 	}
 }
@@ -186,7 +190,7 @@ func (m *Monitor) Observe(b *backend.Backend, err error) {
 	if m.ejectedLocked()+1 > int(m.cfg.MaxEjectedFraction*float64(len(m.pool.Backends()))) {
 		return // keep counting; eject once another replica is re-admitted
 	}
-	m.eject(b, s, m.now(), "consecutive request failures", err)
+	m.eject(b, s, m.now(), true, err)
 }
 
 // Available filters out ejected replicas. If every candidate is ejected it
@@ -237,7 +241,14 @@ func (m *Monitor) ejectedLocked() int {
 	return n
 }
 
-func (m *Monitor) eject(b *backend.Backend, s *state, now time.Time, reason string, err error) {
+func (m *Monitor) eject(b *backend.Backend, s *state, now time.Time, passive bool, err error) {
+	reason := "health check failed"
+	if passive {
+		reason = "consecutive request failures"
+	}
+	if m.cfg.OnEject != nil {
+		m.cfg.OnEject(b, passive)
+	}
 	if !s.readmitted.IsZero() && now.Sub(s.readmitted) >= m.cfg.MaxEjection {
 		s.ejections = 0 // it stayed in service long enough to be forgiven
 	}

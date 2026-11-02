@@ -19,6 +19,74 @@ Apple M3 Pro laptop. Phases 2–4 ran three replicas as local processes; Phase 5
 ran on a 3-node kind cluster. Raw per-request data and setup for each table are
 in [`bench/results/`](bench/results/).
 
+### Observability (Phase 6)
+
+A TinyServe process is killed with SIGKILL while serving 120 req/s, on the kind
+cluster with Prometheus, Jaeger and Grafana installed and every request
+traced. 28,948 of 28,951 requests succeed. The gateway's metrics and traces
+show exactly how the 3 that failed were lost:
+
+![Grafana dashboard during the crash](docs/img/phase6_dashboard.png)
+
+| Time | What the gateway saw |
+|---|---|
+| 07:17:29.72 | The process dies. 3 streams already generating break mid-stream. Text had reached those clients, so they end `UNAVAILABLE`: the only failures. |
+| same instant | 2 new requests find the replica unreachable and fail over. Both succeed. |
+| +0.8 s | Kubernetes marks the pod not-ready, and discovery drops it from the pool. No ejection was needed: Kubernetes noticed before the gateway's 5-failure threshold was reached. |
+| +2.8 s | The restarted container passes its readiness probe and rejoins the pool. |
+| next ~60 s | p99 TTFT rises to about 200 ms, and so does the engine's own p99. The survivor carries all the traffic while the restarted replica's prefix cache refills. |
+
+One of the failovers, in Jaeger. The first attempt hit the dead replica
+and failed in 14 ms; the second succeeded on the other replica:
+
+![Trace of a failover: two attempt spans](docs/img/phase6_trace.png)
+
+**What telemetry costs.** These runs put the gateway in front of three fake
+replicas that answer instantly, so the gateway itself is the bottleneck: a
+closed loop of 64 clients, 30,000 requests per run, 3 rounds. The table shows
+the median of each.
+
+| Telemetry | Throughput | p99 latency | Gateway CPU per request |
+|---|---:|---:|---:|
+| off | 27,100 req/s | 4.7 ms | 159 µs |
+| metrics | 27,400 req/s | 4.8 ms | 158 µs |
+| metrics + tracing, 0% sampled | 24,900 req/s | 5.5 ms | 191 µs |
+| metrics + tracing, 10% sampled | 25,000 req/s | 5.6 ms | 186 µs |
+| metrics + tracing, 100% sampled | 24,500 req/s | 6.5 ms | 197 µs |
+
+- **Metrics are free** at this resolution.
+- **Tracing costs about 30 µs per request, whatever the sample rate.**
+  - With tracing installed, the gRPC and HTTP instrumentation runs on every
+    request: context propagation, span plumbing, and `traceparent` injection.
+    Sampling 0% costs as much as sampling 10%.
+  - Recording and exporting every span adds only about 8 µs more.
+  - So lowering the sample rate barely saves CPU. The real choice is whether
+    to install tracing at all.
+- **Against real inference, this is noise.** A TinyServe request takes
+  milliseconds of engine CPU, so tens of microseconds in the gateway don't
+  matter. They would matter for a gateway in front of something much
+  cheaper than an LLM.
+
+Three earlier runs on the same cluster each taught something:
+
+- **Deleting a pod isn't a crash.** The first demo used
+  `kubectl delete --force --grace-period 0`, and all 28,620 requests
+  succeeded. The pod leaves the EndpointSlice at once, but the container
+  still gets SIGTERM, so its streams finish
+  ([`phase6_demo_force_delete.md`](bench/results/phase6_demo_force_delete.md)).
+  A SIGKILL from the node is a crash.
+- **A rate graph missed the first crash.** The gateway logged the failures,
+  but every failure counter was created by the crash itself, so `rate()`
+  showed nothing. Counters now start at 0.
+- **I starved the engines myself.** Building an image during a run took the
+  CPU the engines needed: both replicas hit the 5 s first-token timeout and
+  were ejected in turn. Those numbers are not reported; the run above was
+  done on an idle machine.
+
+Reproduce with `OBSERVABILITY=1 deploy/kind/up.sh`, then
+`bench/phase6_demo.sh`, and `bench/phase6_overhead.sh` (without the cluster)
+([`phase6_overhead.md`](bench/results/phase6_overhead.md)).
+
 ### Rolling updates on Kubernetes (Phase 5)
 
 The setup is real TinyServe on a 3-node kind cluster: 2 TinyServe pods, 2
@@ -183,6 +251,59 @@ Reproduce the fake run with `bench/phase2_uneven.sh`.
 
 ## Status
 
+**Phase 6 (done): observability**
+
+- **Prometheus metrics** on `-metrics-listen` (default `:9090`, path
+  `/metrics`), all prefixed `tsgw_`:
+  - **Requests:** `requests_total{code,priority}`, `ttft_seconds`,
+    `inter_chunk_seconds`, `request_duration_seconds`, `inflight`.
+  - **Routing:** `routing_decisions_total{reason}`, where the reason is
+    `prefix_match`, `spill` or `no_match` for `prefix_aware`, and the router's
+    name otherwise. Also `prefix_match_blocks`.
+  - **Faults:** `attempts_total{result}`, `retries_total`,
+    `retry_budget_exhausted_total`, `shed_total{priority}`,
+    `ejections_total{trigger}`.
+  - **Tokens:** `prompt_tokens_total`, `prefix_tokens_reused_total`,
+    `tokens_generated_total`, as the replicas report them.
+  - **Per replica:** `replicas`, `backend_load`, `backend_inflight` and
+    `backend_ejected`. These are read from the pool at scrape time, so a
+    replica that leaves leaves no stale series behind.
+  - **Every labelled counter starts at 0.** Without that, a counter has no
+    series until its first increment, and `rate()` can't see the jump from
+    nothing to that first value. That was not hypothetical: in the first
+    crash run, the gateway logged 161 failed attempts and 2 ejections, and
+    every rate graph showed zero.
+  - `inter_chunk_seconds` is per chunk, not per token. TinyServe sends several
+    tokens per event (`steps_per_call`).
+- **OpenTelemetry traces** with `-otlp-endpoint host:port` (OTLP/gRPC), sampling
+  `-trace-sample` of requests (default 10%). A caller's `traceparent` decision
+  is kept.
+  - **The span tree** is the gRPC server span (otelgrpc), one `attempt` span
+    per replica tried, and the HTTP client span (otelhttp) under each attempt.
+  - **Each `attempt` span** carries the replica, the routing reason, the
+    predicted prefix match and the outcome. It also carries the replica's own
+    timings: queue wait, time to first token, latency, and prefix tokens
+    reused. Together these split an attempt into queueing, prefill and decode
+    without the Python server emitting spans of its own.
+  - **Only generation requests are traced.** Health checks and `/metrics`
+    scrapes run several times a second per replica and would bury the
+    spans that matter.
+- **Grafana dashboard** (`deploy/grafana/tinyserve-gateway.json`) puts gateway
+  and engine metrics side by side:
+  - the gateway's TTFT against the engine's own, where the gap is what the
+    gateway adds;
+  - prefix reuse as reported to the gateway against the engines' cache
+    counters;
+  - each replica's load as the router sees it against what the engine
+    reports.
+- **`OBSERVABILITY=1 deploy/kind/up.sh`** installs Prometheus, Jaeger and
+  Grafana, and traces every request.
+- **Not built:**
+  - Spans inside TinyServe. The gateway does send `traceparent`, but the
+    Python server doesn't read it yet.
+  - Exemplars linking latency buckets to traces.
+  - Alerting rules.
+
 **Phase 5 (done): Kubernetes**
 
 - **Live replica pool.** The replica set can change while the gateway runs.
@@ -217,7 +338,12 @@ Reproduce the fake run with `bench/phase2_uneven.sh`.
     own queue depth plus active sequences (8 per replica by default).
   - CPU is a poor signal for this engine: a replica with a full batch and a
     long queue can sit at the same CPU use as one just keeping up.
-  - The chart installs both modes, but this README has no autoscaling numbers.
+  - **Not verified.** The chart installs both modes, but neither has been run
+    under load. The `keda` path did have a bug in `up.sh`: Prometheus would
+    not start, because its scrape timeout was longer than its 5 s interval.
+    That was found and fixed in Phase 6. A KEDA install has still not
+    completed here, because Docker on this machine stalls pulling KEDA's
+    images from ghcr.io.
 - **One image** (distroless, non-root) holds the gateway, loadgen, tsctl and the
   fake backend.
 - **kind setup:** `deploy/kind/up.sh` creates the cluster, builds and loads the
@@ -347,8 +473,7 @@ Reproduce the fake run with `bench/phase2_uneven.sh`.
 
 **Requires** TinyServe's `POST /generate/stream` endpoint (server-sent events).
 
-**Next**: observability (Phase 6): Prometheus metrics from the gateway
-itself, and OpenTelemetry traces across gateway and replica.
+**Next**: the write-up (Phase 7).
 
 ## Run it
 
@@ -391,6 +516,15 @@ kubectl scale deploy/ts-tinyserve --replicas 3   # the gateway picks it up withi
 kind delete cluster --name tinyserve
 ```
 
+With dashboards and traces:
+
+```bash
+OBSERVABILITY=1 deploy/kind/up.sh        # adds Prometheus, Jaeger, Grafana
+kubectl -n monitoring port-forward svc/grafana 3000 &   # http://localhost:3000
+kubectl -n monitoring port-forward svc/jaeger 16686 &   # http://localhost:16686
+bench/phase6_demo.sh                     # 4 min of traffic, one TinyServe crash at t=60s
+```
+
 `deploy/kind/up.sh` expects the TinyServe checkout at `../tinyserve`
 (`TINYSERVE_DIR` to change it).
 
@@ -416,6 +550,9 @@ kind delete cluster --name tinyserve
 | `-retry-budget`, `-retry-min-per-sec` | `0.1`, `10` | Retries allowed per request, plus per second (negative = unlimited) |
 | `-max-inflight` | `1024` | Streams served at once before shedding, lowest priority first (`0` = no limit) |
 | `-drain-timeout` | `30s` | How long SIGTERM waits for open streams |
+| `-metrics-listen` | `:9090` | HTTP address for Prometheus `/metrics` (empty = off) |
+| `-otlp-endpoint` | | OTLP/gRPC collector `host:port` for traces (empty = tracing off) |
+| `-trace-sample` | `0.1` | Fraction of requests traced, unless the caller's `traceparent` decided |
 | `-v` | off | Debug logging |
 
 ## Develop
@@ -437,11 +574,14 @@ cmd/tsctl/            CLI client
 cmd/loadgen/          load generator
 bench/                benchmark scripts and raw results
 deploy/helm/          Helm chart: TinyServe, gateway, autoscaling
-deploy/kind/          local 3-node cluster and setup script
+deploy/kind/          local 3-node cluster, setup script, Jaeger and Grafana
+deploy/grafana/       the Grafana dashboard
+docs/img/             dashboard and trace screenshots
 internal/backend/     TinyServe SSE client, /metrics scraping, health check, load and overload state
 internal/pool/        the live replica set, shared by router, health checks and scraping
 internal/discovery/   replicas from Kubernetes EndpointSlices
 internal/health/      active health checks, outlier ejection with backoff
+internal/metrics/     Prometheus metrics
 internal/router/      round-robin, random, least-loaded (P2C), consistent hash, prefix-aware
 internal/server/      gRPC service: admission, routing, failover, retry budget, error mapping
 internal/fakebackend/ fake replica, shared by tests and cmd/fakebackend

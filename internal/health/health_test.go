@@ -100,6 +100,24 @@ func TestPassiveEjectionIsCapped(t *testing.T) {
 	}
 }
 
+func TestOnEjectReportsTrigger(t *testing.T) {
+	var passive, active int
+	f := newFixture(t, 2, Config{ConsecutiveFailures: 1, UnhealthyThreshold: 1, Interval: time.Second,
+		Timeout: 50 * time.Millisecond, OnEject: func(_ *backend.Backend, p bool) {
+			if p {
+				passive++
+			} else {
+				active++
+			}
+		}})
+	f.m.Observe(f.pool[0], failed(f.pool[0]))
+	f.fakes[1].Configure(fakebackend.Config{Stall: true})
+	f.m.checkAll(context.Background())
+	if passive != 1 || active != 1 {
+		t.Fatalf("OnEject saw %d passive and %d active ejections, want 1 and 1", passive, active)
+	}
+}
+
 func TestAllEjectedFallsBackToAll(t *testing.T) {
 	f := newFixture(t, 2, Config{UnhealthyThreshold: 1, Interval: time.Second})
 	for _, fake := range f.fakes {

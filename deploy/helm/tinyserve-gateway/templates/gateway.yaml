@@ -81,6 +81,10 @@ spec:
       labels:
         {{- include "tsg.labels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.gateway.metricsPort | quote }}
+        prometheus.io/path: /metrics
     spec:
       serviceAccountName: {{ include "tsg.gateway" . }}
       terminationGracePeriodSeconds: {{ add .Values.gateway.drainTimeoutSeconds .Values.gateway.preStopSleepSeconds 5 }}
@@ -94,11 +98,17 @@ spec:
             - -k8s-port=http
             - -router={{ .Values.gateway.router }}
             - -drain-timeout={{ .Values.gateway.drainTimeoutSeconds }}s
+            - -metrics-listen=:{{ .Values.gateway.metricsPort }}
+            {{- with .Values.tracing.otlpEndpoint }}
+            - -otlp-endpoint={{ . }}
+            - -trace-sample={{ $.Values.tracing.sampleRatio }}
+            {{- end }}
             {{- range .Values.gateway.extraArgs }}
             - {{ . | quote }}
             {{- end }}
           ports:
             - {name: grpc, containerPort: 9000}
+            - {name: metrics, containerPort: {{ .Values.gateway.metricsPort }}}
           # The gRPC health service: NOT_SERVING until discovery finds a
           # replica, and again once SIGTERM starts the drain.
           readinessProbe:

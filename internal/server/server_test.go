@@ -53,7 +53,7 @@ func startGatewayWith(t *testing.T, rs []replica, routerName string) pb.Inferenc
 
 // startGatewayConfig is startGatewayWith, with configure (if non-nil) adjusting
 // the server's Config before it starts.
-func startGatewayConfig(t *testing.T, rs []replica, routerName string, configure func(*Config)) pb.InferenceClient {
+func startGatewayConfig(t *testing.T, rs []replica, routerName string, configure func(*Config), opts ...grpc.ServerOption) pb.InferenceClient {
 	t.Helper()
 	var replicas pool.Static
 	for _, r := range rs {
@@ -68,7 +68,7 @@ func startGatewayConfig(t *testing.T, rs []replica, routerName string, configure
 		configure(&cfg)
 	}
 	lis := bufconn.Listen(1 << 20)
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(opts...)
 	pb.RegisterInferenceServer(srv, New(cfg))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)

@@ -10,6 +10,8 @@ gateway:
   # Seconds a terminating pod keeps serving before SIGTERM, so clients and
   # Services stop picking it before it stops accepting.
   preStopSleepSeconds: 5
+  # Prometheus /metrics; pods are annotated for prometheus.io scraping.
+  metricsPort: 9090
   # Extra gateway flags, e.g. ["-max-inflight", "512", "-first-token-timeout", "3s"].
   extraArgs: []
   resources:
@@ -36,6 +38,13 @@ tinyserve:
     limits: {cpu: "2", memory: 512Mi}
   pdb:
     minAvailable: 1
+
+tracing:
+  # OTLP/gRPC collector address (host:port), e.g. jaeger.monitoring.svc:4317.
+  # Empty turns tracing off.
+  otlpEndpoint: ""
+  # Fraction of requests traced, unless the caller's traceparent already decided.
+  sampleRatio: 0.1
 
 autoscaling:
   # none | cpu (HPA on CPU, no dependencies) | keda (KEDA + Prometheus, on
