@@ -2,7 +2,7 @@ GO ?= go
 BIN := bin
 STATICCHECK := honnef.co/go/tools/cmd/staticcheck@v0.8.2
 
-.PHONY: all build proto test race lint image kind kind-observability kind-down run fake clean
+.PHONY: all build proto test race lint image kind kind-observability kind-cilium kind-down run fake clean
 
 all: build
 
@@ -39,6 +39,10 @@ kind:
 # The same, plus Prometheus, Jaeger and Grafana, with every request traced.
 kind-observability:
 	OBSERVABILITY=1 deploy/kind/up.sh
+
+# The same on Cilium, with network policy around both components and Hubble.
+kind-cilium:
+	CNI=cilium deploy/kind/up.sh
 
 kind-down:
 	kind delete cluster --name tinyserve

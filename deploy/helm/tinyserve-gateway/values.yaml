@@ -46,6 +46,17 @@ tracing:
   # Fraction of requests traced, unless the caller's traceparent already decided.
   sampleRatio: 0.1
 
+networkPolicy:
+  # CiliumNetworkPolicies around both components (needs Cilium as the CNI):
+  # only the gateway reaches TinyServe, and the gateway reaches only TinyServe,
+  # the API server, DNS and the trace collector.
+  enabled: false
+  # Also check TinyServe traffic at L7, in Cilium's Envoy proxy: the gateway
+  # may make only the three requests it needs (stream, health, metrics).
+  l7: true
+  # Namespace allowed to scrape /metrics and receive traces.
+  monitoringNamespace: monitoring
+
 autoscaling:
   # none | cpu (HPA on CPU, no dependencies) | keda (KEDA + Prometheus, on
   # TinyServe's own queue depth and running batch size)

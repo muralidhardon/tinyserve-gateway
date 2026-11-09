@@ -4,9 +4,12 @@
 #   deploy/kind/up.sh                 # cluster, images, chart
 #   AUTOSCALING=keda deploy/kind/up.sh  # also Prometheus + KEDA, scaling on queue depth
 #   OBSERVABILITY=1 deploy/kind/up.sh   # also Prometheus, Jaeger and Grafana; every request traced
+#   CNI=cilium deploy/kind/up.sh        # Cilium instead of kindnet + kube-proxy, Hubble,
+#                                       # and CiliumNetworkPolicies around both components
 #   kind delete cluster --name tinyserve
 #
 # TINYSERVE_DIR points at the TinyServe checkout (default ../tinyserve).
+# CNI only takes effect when the cluster is created; delete it to switch.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -15,15 +18,28 @@ RELEASE=${RELEASE:-ts}
 TS=${TINYSERVE_DIR:-../tinyserve}
 AUTOSCALING=${AUTOSCALING:-none}
 OBSERVABILITY=${OBSERVABILITY:-}
+CNI=${CNI:-kindnet}
+CILIUM_VERSION=${CILIUM_VERSION:-1.20.4}
 
-kind get clusters | grep -qx "$CLUSTER" || kind create cluster --config deploy/kind/cluster.yaml
+CLUSTER_CONFIG=deploy/kind/cluster.yaml
+[ "$CNI" = cilium ] && CLUSTER_CONFIG=deploy/kind/cluster-cilium.yaml
+kind get clusters | grep -qx "$CLUSTER" || kind create cluster --config "$CLUSTER_CONFIG"
 kubectl config use-context "kind-$CLUSTER" >/dev/null
+
+CHART_ARGS=(--set autoscaling.type="$AUTOSCALING")
+if [ "$CNI" = cilium ]; then
+  helm repo add cilium https://helm.cilium.io >/dev/null
+  helm repo update cilium >/dev/null
+  helm upgrade --install cilium cilium/cilium --version "$CILIUM_VERSION" \
+    -n kube-system -f deploy/kind/cilium-values.yaml --wait --timeout 10m
+  kubectl -n kube-system rollout status ds/cilium deploy/hubble-relay --timeout 5m
+  CHART_ARGS+=(--set networkPolicy.enabled=true)
+fi
 
 docker build -q -t tinyserve-gateway:dev .
 docker build -q -t tinyserve:dev "$TS"
 kind load docker-image --name "$CLUSTER" tinyserve-gateway:dev tinyserve:dev
 
-CHART_ARGS=(--set autoscaling.type="$AUTOSCALING")
 if [ "$AUTOSCALING" = keda ] || [ -n "$OBSERVABILITY" ]; then
   # Just the Prometheus server, scraping pods annotated prometheus.io/scrape.
   # The timeout must not exceed the interval; the chart's default is 10s.

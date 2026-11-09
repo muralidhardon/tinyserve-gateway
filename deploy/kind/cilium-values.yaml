@@ -1,0 +1,19 @@
+# Cilium on the kind cluster from cluster-cilium.yaml.
+#
+# kube-proxy is gone, so Cilium answers Service traffic itself (socket-level
+# and tc eBPF load balancing) and has to reach the API server directly.
+kubeProxyReplacement: true
+k8sServiceHost: tinyserve-control-plane
+k8sServicePort: 6443
+ipam:
+  mode: kubernetes
+operator:
+  replicas: 1
+# Hubble: per-flow visibility, including the verdict and the L7 request for
+# traffic that goes through Cilium's Envoy proxy.
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+  ui:
+    enabled: true
