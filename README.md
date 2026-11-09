@@ -41,6 +41,7 @@ produced them, are in [`bench/`](bench/).
 | **A frozen replica** (`SIGSTOP`), then another killed (`SIGKILL`) | round-robin, no protection: 125 failed, p95 TTFT 2,015 ms | health checks and ejection: **8 failed, p95 19 ms** |
 | **Every pod replaced** under 100 req/s (Kubernetes) | 768 of 7,437 failed, because the client's DNS re-resolution was rate-limited | **0 of 7,606 failed** |
 | **A TinyServe process crashes** under 120 req/s (Kubernetes) | | **3 of 28,951 failed**: the streams already generating |
+| **Network policy** on Cilium: only the gateway reaches TinyServe, and only with the 3 requests it makes | any pod could call any TinyServe endpoint | other pods dropped at L3/L4, other requests 403 at L7; **no measurable latency cost**, and **0 of 7,555 failed** across a rolling update |
 | **Telemetry cost**, gateway CPU per request | 159 µs with telemetry off | metrics +0 µs; tracing +30 µs at any sample rate |
 
 The rest of this section gives each result's setup and caveats. Why the
@@ -180,6 +181,45 @@ succeeded elsewhere:
 
 ![Trace of a failover: two attempt spans](docs/img/phase6_trace.png)
 
+### Network policy (Cilium)
+
+TinyServe has no authentication: anything that can reach port 8000 can run
+generations. With `CNI=cilium deploy/kind/up.sh`, the cluster runs Cilium in
+place of kindnet and kube-proxy, and the chart adds a `CiliumNetworkPolicy`
+for each component:
+
+- **TinyServe** accepts connections only from this release's gateway pods,
+  and (L7, enforced in Cilium's Envoy proxy) only `POST /generate/stream`,
+  `GET /health` and `GET /metrics`. It can't open connections of its own.
+- **The gateway** can call only TinyServe, the API server, DNS and the trace
+  collector.
+
+Checked from throwaway pods, with Hubble recording each verdict:
+
+| From | Request | Result |
+|---|---|---|
+| a pod without the gateway's labels | `GET /health` | dropped (SYN, `Policy denied`) |
+| a pod with the gateway's labels | `GET /health`, `POST /generate/stream` | 200 |
+| | `POST /generate`, `GET /docs` | 403 from Envoy (`http-request DROPPED`) |
+| a TinyServe pod | connect to the API server | dropped (`denied by denylist`) |
+
+The L7 rules put every gateway-to-TinyServe request through Envoy. At
+100 req/s that cost nothing measurable:
+
+| 100 req/s, 60 s | p50 TTFT | p95 TTFT | p50 latency | p95 latency |
+|---|---:|---:|---:|---:|
+| no policy | 4.1 ms | 10.7 ms | 9.9 ms | 28.9 ms |
+| L3/L4 policy (eBPF only) | 4.1 ms | 10.6 ms | 10.1 ms | 30.6 ms |
+| L3/L4 + L7 HTTP (Envoy) | 4.3 ms | 10.0 ms | 10.2 ms | 27.4 ms |
+
+The p99s varied more between runs than between rows. The rolling-update run
+behaves as it does without Cilium: with the policies on, 0 of 7,555 failed
+with drain and 1 s DNS re-resolution, and 762 failed with gRPC's 30 s default.
+
+Identity is the pod's labels, so a pod that copies the gateway's labels is
+let in, as the second row shows. That's what Kubernetes RBAC over who can
+create pods in the namespace has to guard.
+
 ### What telemetry costs
 
 These runs used three fake replicas that answer instantly, so the gateway
@@ -245,7 +285,9 @@ run, the median of 3 rounds.
   - readiness tied to discovery and drain;
   - a Helm chart with PodDisruptionBudgets, surge-only rolling updates and
     RBAC;
-  - CPU or KEDA autoscaling.
+  - CPU or KEDA autoscaling;
+  - optional Cilium network policies (L3/L4 and L7 HTTP), with Hubble for
+    flow visibility.
 - **Observability:**
   - Prometheus metrics;
   - OpenTelemetry traces with one span per attempt, carrying the replica's
@@ -297,6 +339,14 @@ kubectl scale deploy/ts-tinyserve --replicas 3   # the gateway picks it up withi
 kind delete cluster --name tinyserve
 ```
 
+On Cilium, with network policy and Hubble:
+
+```bash
+CNI=cilium deploy/kind/up.sh             # Cilium (kube-proxy replacement), then the chart with policies
+kubectl -n kube-system exec ds/cilium -c cilium-agent -- hubble observe --verdict DROPPED
+kubectl -n kube-system port-forward svc/hubble-ui 12000:80 &   # http://localhost:12000
+```
+
 With dashboards and traces:
 
 ```bash
@@ -319,6 +369,8 @@ bench/phase6_demo.sh                     # 4 min of traffic, one TinyServe crash
 | Rolling updates | `bench/phase5_rollout.sh` | `deploy/kind/up.sh` |
 | Crash with metrics and traces | `bench/phase6_demo.sh` | `OBSERVABILITY=1 deploy/kind/up.sh` |
 | Telemetry cost | `bench/phase6_overhead.sh` | Docker (for Jaeger) |
+| Network policy checks and cost | `bench/phase7_cilium.sh` | `CNI=cilium deploy/kind/up.sh` |
+| Rolling updates on Cilium | `NAME=phase5_rollout_cilium HELM_ARGS="--set networkPolicy.enabled=true" bench/phase5_rollout.sh` | `CNI=cilium deploy/kind/up.sh` |
 
 ### Gateway flags
 

@@ -1,0 +1,96 @@
+{{- if .Values.networkPolicy.enabled }}
+# TinyServe has no auth of its own, so the network is its access control:
+# only gateway pods of this release may connect, and (with l7) only to make
+# the requests the gateway actually sends. Kubelet probes come from the node,
+# which Cilium allows by default.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "tsg.tinyserve" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "tsg.selector" (dict "root" . "component" "tinyserve") | nindent 6 }}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            {{- include "tsg.selector" (dict "root" . "component" "gateway") | nindent 12 }}
+      toPorts:
+        - ports:
+            - {port: "8000", protocol: TCP}
+          {{- if .Values.networkPolicy.l7 }}
+          rules:
+            http:
+              - {method: POST, path: /generate/stream}
+              - {method: GET, path: /health}
+              - {method: GET, path: /metrics}
+          {{- end }}
+    # Prometheus scrapes TinyServe's queue metrics.
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicy.monitoringNamespace }}
+      toPorts:
+        - ports:
+            - {port: "8000", protocol: TCP}
+          {{- if .Values.networkPolicy.l7 }}
+          rules:
+            http:
+              - {method: GET, path: /metrics}
+          {{- end }}
+  # TinyServe calls nothing. With no egress allow rules Cilium would leave
+  # egress unenforced, so deny it outright; replies to the gateway's
+  # connections are not new connections and still flow.
+  egressDeny:
+    - toEntities: [all]
+---
+# The gateway serves gRPC to anything in the cluster and calls only what it
+# needs: TinyServe, the API server (EndpointSlice watch), DNS, and the trace
+# collector.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "tsg.gateway" . }}
+  labels:
+    {{- include "tsg.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "tsg.selector" (dict "root" . "component" "gateway") | nindent 6 }}
+  ingress:
+    - fromEntities: [cluster]
+      toPorts:
+        - ports:
+            - {port: "9000", protocol: TCP}
+    - fromEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicy.monitoringNamespace }}
+      toPorts:
+        - ports:
+            - {port: {{ .Values.gateway.metricsPort | quote }}, protocol: TCP}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            {{- include "tsg.selector" (dict "root" . "component" "tinyserve") | nindent 12 }}
+      toPorts:
+        - ports:
+            - {port: "8000", protocol: TCP}
+    - toEntities: [kube-apiserver]
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - {port: "53", protocol: UDP}
+            - {port: "53", protocol: TCP}
+    {{- if .Values.tracing.otlpEndpoint }}
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.networkPolicy.monitoringNamespace }}
+      toPorts:
+        - ports:
+            - {port: "4317", protocol: TCP}
+    {{- end }}
+{{- end }}

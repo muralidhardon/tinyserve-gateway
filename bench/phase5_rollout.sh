@@ -17,6 +17,8 @@
 # Needs the cluster from deploy/kind/up.sh.
 #
 #   bench/phase5_rollout.sh       # writes bench/results/phase5_rollout.md
+#   NAME=phase5_rollout_cilium HELM_ARGS="--set networkPolicy.enabled=true" bench/phase5_rollout.sh
+#                                 # the same on a CNI=cilium cluster, policy on
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,11 +26,12 @@ RELEASE=${RELEASE:-ts}
 RATE=${RATE:-100}
 DURATION=${DURATION:-75s}
 OUT=bench/results
+NAME=${NAME:-phase5_rollout}
 mkdir -p "$OUT"
 kubectl config use-context kind-tinyserve >/dev/null
 
 install() {
-  helm upgrade --install "$RELEASE" deploy/helm/tinyserve-gateway --set autoscaling.type=none "$@" --wait --timeout 5m >/dev/null
+  helm upgrade --install "$RELEASE" deploy/helm/tinyserve-gateway --set autoscaling.type=none ${HELM_ARGS:-} "$@" --wait --timeout 5m >/dev/null
   kubectl rollout status deploy/"$RELEASE"-tinyserve --timeout 5m >/dev/null
   kubectl rollout status deploy/"$RELEASE"-gateway --timeout 5m >/dev/null
 }
@@ -72,4 +75,4 @@ run() {
   run "drain, client DNS interval 30s (gRPC default)"
   run "drain, client DNS interval 1s" -dns-min-interval 1s
   echo '```'
-} | tee "$OUT/phase5_rollout.md"
+} | tee "$OUT/$NAME.md"

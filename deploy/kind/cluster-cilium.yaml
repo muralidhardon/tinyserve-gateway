@@ -1,0 +1,12 @@
+# The same 3 nodes as cluster.yaml, without kind's own CNI or kube-proxy:
+# Cilium does pod networking, Service load balancing and policy in eBPF.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: tinyserve
+networking:
+  disableDefaultCNI: true
+  kubeProxyMode: none
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
